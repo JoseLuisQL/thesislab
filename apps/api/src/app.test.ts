@@ -23,4 +23,27 @@ describe('GET /health', () => {
       timestamp: expect.any(String),
     });
   });
+
+  it('supports manifest validation via curl-friendly json fields', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/health',
+      headers: {
+        accept: 'application/json',
+      },
+    });
+
+    const payload = response.json() as {
+      ok: boolean;
+      service: string;
+      mission: string;
+      timestamp: string;
+    };
+
+    expect(response.headers['content-type']).toContain('application/json');
+    expect(payload.ok).toBe(true);
+    expect(payload.service).toBe('api');
+    expect(payload.mission).toBe('foundation-platform');
+    expect(() => new Date(payload.timestamp).toISOString()).not.toThrow();
+  });
 });

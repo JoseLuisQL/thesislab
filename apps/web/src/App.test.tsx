@@ -11,4 +11,12 @@ describe('App', () => {
     expect(html).toContain('Memory &amp; resume');
     expect(html).toContain('LaTeX workbench');
   });
+
+  it('renders copy that matches the Docker-first platform contract', () => {
+    const html = renderToString(<App />);
+
+    expect(html).toContain('Thesis Research OS');
+    expect(html).toContain('Baseline shell for the modular monorepo');
+    expect(html).toContain('Future workers will extend these routes');
+  });
 });
