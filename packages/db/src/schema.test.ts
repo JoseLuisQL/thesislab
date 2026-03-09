@@ -104,6 +104,7 @@ describe('schema migrations', () => {
     const databasePath = path.resolve('/root/thesislab', databaseUrl.slice('file:'.length));
     const migrationPaths = [
       path.resolve(import.meta.dirname, '../drizzle/0001_unknown_komodo.sql'),
+      path.resolve(import.meta.dirname, '../drizzle/0002_soft_tenebrous.sql'),
     ];
 
     const seedSql = [
@@ -113,6 +114,7 @@ describe('schema migrations', () => {
       "INSERT INTO workflow_tasks (id, thesis_id, parent_task_id, title, intent, status, priority, sort_order, due_at, active_checkpoint_id) VALUES ('task-1', 'thesis-1', NULL, 'Primary task', 'Verify thesis flow', 'active', 1, 1, NULL, NULL)",
       "INSERT INTO workflow_tasks (id, thesis_id, parent_task_id, title, intent, status, priority, sort_order, due_at, active_checkpoint_id) VALUES ('task-2', 'thesis-1', 'task-1', 'Child task', 'Verify nested thesis flow', 'pending', 2, 2, NULL, NULL)",
       "INSERT INTO workflow_packs (id, thesis_id, name, description, status, current_step_id) VALUES ('pack-1', 'thesis-1', 'Pack', 'Workflow pack', 'active', NULL)",
+      "INSERT INTO workflow_steps (id, thesis_id, workflow_pack_id, title, description, status, step_order) VALUES ('step-1', 'thesis-1', 'pack-1', 'Draft chapter outline', 'Create the first outline draft', 'active', 1)",
       "INSERT INTO normalized_nodes (id, thesis_id, intake_job_id, parent_node_id, node_type, title, content, ordinal, source_path, source_start, source_end, provenance_kind, provenance_json) VALUES ('node-1', 'thesis-1', NULL, NULL, 'chapter', 'Introducción', 'Contenido', 1, 'main.tex', '1', '10', 'latex', '{}')",
       "INSERT INTO normalized_nodes (id, thesis_id, intake_job_id, parent_node_id, node_type, title, content, ordinal, source_path, source_start, source_end, provenance_kind, provenance_json) VALUES ('node-2', 'thesis-1', NULL, 'node-1', 'section', 'Marco teórico', 'Más contenido', 2, 'chapter1.tex', '11', '20', 'latex', '{}')",
       "INSERT INTO sources (id, thesis_id, source_type, title, authors_json, publication_year, locator, status, ingest_metadata_json) VALUES ('source-1', 'thesis-1', 'article', 'A source', '[\"Ada\"]', 2024, 'doi:demo', 'ready', '{}')",
@@ -133,6 +135,7 @@ describe('schema migrations', () => {
       "INSERT INTO compliance_issues (id, thesis_id, compliance_run_id, policy_profile_id, rule_id, normalized_node_id, severity, message, remediation, disposition) VALUES ('compliance-issue-invalid', 'thesis-1', 'compliance-run-1', 'policy-1', 'rule-1', 'missing-node', 'warning', 'Broken issue', NULL, 'warning')",
       "INSERT INTO academic_qa_issues (id, thesis_id, academic_qa_run_id, claim_id, normalized_node_id, category, severity, message, rationale, remediation, triggering_condition) VALUES ('qa-issue-invalid-claim', 'thesis-1', 'qa-run-1', 'missing-claim', 'node-2', 'evidence-gap', 'warning', 'Broken qa issue', 'Missing claim', NULL, 'low-support')",
       "INSERT INTO build_runs (id, thesis_id, checkpoint_id, status, engine, artifact_path, diagnostics_json, bibliography_status, started_at, completed_at, is_latest_successful) VALUES ('build-invalid', 'thesis-1', 'missing-checkpoint', 'failed', 'latexmk', NULL, '{}', 'unknown', '2026-03-09T00:30:00.000Z', NULL, 0)",
+      "INSERT INTO workflow_steps (id, thesis_id, workflow_pack_id, title, description, status, step_order) VALUES ('step-invalid-pack', 'thesis-1', 'missing-pack', 'Broken workflow step', 'Should fail because the pack does not exist', 'pending', 2)",
     ];
 
     const pythonScript = String.raw`

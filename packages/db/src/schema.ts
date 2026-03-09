@@ -83,7 +83,7 @@ export const workflowPacks = sqliteTable('workflow_packs', {
 export const workflowSteps = sqliteTable('workflow_steps', {
   id: text('id').primaryKey(),
   thesisId: text('thesis_id').notNull().references(() => theses.id, { onDelete: 'cascade' }),
-  workflowPackId: text('workflow_pack_id').notNull(),
+  workflowPackId: text('workflow_pack_id').notNull().references(() => workflowPacks.id, { onDelete: 'cascade' }),
   title: text('title').notNull(),
   description: text('description').notNull(),
   status: text('status').notNull(),
