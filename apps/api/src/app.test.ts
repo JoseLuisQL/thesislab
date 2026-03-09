@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 
 import { createApp } from './app.js';
 
@@ -45,5 +45,23 @@ describe('GET /health', () => {
     expect(payload.service).toBe('api');
     expect(payload.mission).toBe('foundation-platform');
     expect(() => new Date(payload.timestamp).toISOString()).not.toThrow();
+  });
+});
+
+describe('API port contract', () => {
+  afterAll(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('prefers PORT_API over PORT and falls back to the mission default', async () => {
+    vi.stubEnv('PORT_API', '3123');
+    vi.stubEnv('PORT', '3999');
+
+    const { resolveApiPort } = await import('./server.js');
+
+    expect(resolveApiPort()).toBe(3123);
+
+    vi.stubEnv('PORT_API', '');
+    expect(resolveApiPort()).toBe(3100);
   });
 });

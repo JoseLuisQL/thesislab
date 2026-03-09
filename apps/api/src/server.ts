@@ -1,6 +1,18 @@
 import { createApp } from './app.js';
 
-const port = Number(process.env.PORT ?? 3100);
+export const resolveApiPort = (): number => {
+  const configuredPort = process.env.PORT_API;
+
+  if (!configuredPort) {
+    return 3100;
+  }
+
+  const parsedPort = Number(configuredPort);
+
+  return Number.isFinite(parsedPort) ? parsedPort : 3100;
+};
+
+const port = resolveApiPort();
 const host = '0.0.0.0';
 
 const app = createApp();

@@ -22,7 +22,15 @@ fi
 case "$MODE" in
   start)
     docker rm -f "$NAME" >/dev/null 2>&1 || true
-    docker run -d       --name "$NAME"       -p "${PORT}:${PORT}"       -v "$ROOT:$WORKDIR"       -w "$WORKDIR"       -e PORT="$PORT"       "$IMAGE"       bash -lc "corepack enable && if [ ! -f package.json ]; then echo 'package.json missing' >&2; exit 1; fi; pnpm install --frozen-lockfile=false && pnpm run $SCRIPT"
+    ENV_NAME="PORT_${SERVICE^^}"
+    docker run -d \
+      --name "$NAME" \
+      -p "${PORT}:${PORT}" \
+      -v "$ROOT:$WORKDIR" \
+      -w "$WORKDIR" \
+      -e "$ENV_NAME=$PORT" \
+      "$IMAGE" \
+      bash -lc "corepack enable && if [ ! -f package.json ]; then echo 'package.json missing' >&2; exit 1; fi; pnpm install --frozen-lockfile=false && pnpm run $SCRIPT"
     ;;
   stop)
     docker rm -f "$NAME" >/dev/null 2>&1 || true
