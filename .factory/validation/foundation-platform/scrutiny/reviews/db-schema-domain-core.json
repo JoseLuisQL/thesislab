@@ -1,0 +1,34 @@
+{
+  "featureId": "db-schema-domain-core",
+  "reviewedAt": "2026-03-09T18:25:00Z",
+  "commitId": "80f7948",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The feature establishes broad DB package scaffolding, migration wiring, and tests, but the schema/migration foundation is not yet reliable enough for downstream repository work because several declared relations are not backed by foreign-key constraints in the actual tables, and the current tests do not catch those integrity gaps.",
+    "issues": [
+      {
+        "file": "packages/db/src/schema.ts",
+        "line": 49,
+        "severity": "blocking",
+        "description": "Several ID fields that represent entity relationships are declared as plain text columns instead of foreign keys (for example `workflow_tasks.parent_task_id`, `workflow_tasks.active_checkpoint_id`, `workflow_packs.current_step_id`, `normalized_nodes.parent_node_id`, `evidence_fragments.normalized_node_id`, `evidence_fragments.task_id`, `claims.normalized_node_id`, `zotero_mappings.normalized_node_id`, `zotero_mappings.source_id`, `compliance_issues.normalized_node_id`, `academic_qa_issues.claim_id`, `academic_qa_issues.normalized_node_id`, and `build_runs.checkpoint_id`). Downstream features depend on durable schema relationships, but these references are not enforced in SQLite or the generated migration, so orphaned or cross-entity records can be inserted despite the Drizzle relations API implying integrity."
+      },
+      {
+        "file": "packages/db/src/schema.test.ts",
+        "line": 11,
+        "severity": "non_blocking",
+        "description": "The package-level schema tests only assert table existence and a couple of successful inserts, so they would not detect missing foreign-key constraints or other relational-integrity regressions in the generated migration. This left the blocking schema issue above unverified even though the feature claims a verified migration foundation."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The repo has no top-level README.md, yet the worker transcript includes an attempted `Read` of `/root/thesislab/README.md` because global exec guidance says to start exploration there. The project guidance should document the actual equivalent entrypoint (for example mission docs plus `.factory/library/*`) to avoid repeated dead-end lookups.",
+      "evidence": "Transcript skeleton for worker session 01b58e68-55eb-4308-84ba-92c58482500b shows a `Read` call for `/root/thesislab/README.md`, and the reviewer's read of that path returned ENOENT."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed handoff, transcript skeleton, backend-worker skill, shared-state docs, and commit `80f7948`. The feature added substantial `packages/db` groundwork, but it should fail scrutiny because multiple schema relations are modeled only at the TypeScript/Drizzle relation layer and are not enforced by foreign keys in the generated SQLite schema, leaving the migration foundation insufficiently durable for downstream repository features."
+}

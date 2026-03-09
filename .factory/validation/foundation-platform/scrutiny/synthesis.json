@@ -1,0 +1,75 @@
+{
+  "milestone": "foundation-platform",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "./.factory/bin/node-toolchain.sh test",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "./.factory/bin/node-toolchain.sh typecheck",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "./.factory/bin/node-toolchain.sh lint",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 4,
+    "passed": 0,
+    "failed": 4,
+    "failedFeatures": [
+      "platform-monorepo-scaffold",
+      "platform-docker-toolchain-services",
+      "db-schema-domain-core",
+      "db-repository-boundaries-core"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "platform-monorepo-scaffold",
+      "severity": "blocking",
+      "description": "apps/api/src/server.ts binds to `process.env.PORT ?? 3100` instead of the mission contract variable `PORT_API`, so the scaffolded API runtime is not aligned with `.factory/init.sh` and `.factory/library/environment.md`."
+    },
+    {
+      "featureId": "platform-docker-toolchain-services",
+      "severity": "blocking",
+      "description": "The referenced completion commit `78b26fd` only adds smoke tests and does not implement the Docker-first execution path, service scripts, environment defaults, or validation harness wiring described by the feature; the actual tooling work appears to predate the assigned feature commit."
+    },
+    {
+      "featureId": "db-schema-domain-core",
+      "severity": "blocking",
+      "description": "packages/db schema and migration files leave several declared entity relationships as plain text columns without SQLite foreign-key enforcement, so downstream features can create orphaned or cross-entity records despite the schema implying durable relational integrity."
+    },
+    {
+      "featureId": "db-repository-boundaries-core",
+      "severity": "blocking",
+      "description": "packages/db persistence-contract tests only prove thesis scoping and deterministic ordering for a narrow subset of repositories, leaving most thesis-domain repository boundaries unverified despite the feature claiming package-level tests as the downstream contract."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Clarify how platform features should map completion status to commits or worker sessions so scrutiny can trace feature ownership when implementation lands earlier than follow-up coverage commits.",
+      "evidence": "`platform-docker-toolchain-services` is marked completed by session `9fb04b7e-2a8d-4081-afcc-a6a4bdd29169`, but the referenced commit `78b26fd` only adds smoke tests while the platform scripts and services were introduced in scaffold commit `25e077d`.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Runtime entrypoints should consume the same env var names established by `.factory/init.sh` and `.factory/library/environment.md`.",
+      "reason": "already-documented: `.factory/library/environment.md` already records `PORT_API` and `PORT_WEB`; the review surfaced an implementation bug rather than missing shared-state documentation."
+    },
+    {
+      "observation": "The repo has no top-level README.md, so worker guidance should point to mission docs or `.factory/library/*` as the actual exploration entrypoint.",
+      "reason": "ambiguous: this comes from global exec guidance rather than milestone-specific shared state, so it should be handled outside this scrutiny synthesis."
+    }
+  ],
+  "previousRound": null
+}

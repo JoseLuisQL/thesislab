@@ -1,0 +1,22 @@
+{
+  "featureId": "db-repository-boundaries-core",
+  "reviewedAt": "2026-03-09T18:24:36.196057Z",
+  "commitId": "74d69a4d4accc5d846c841174a689ba83de70716",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The feature adds reusable persistence helpers, package exports, and a registry wrapper around domain repositories, but the package-level contract coverage is incomplete for the stated repository boundary. The new tests only exercise thesis/checkpoint/policy access and helper generation, leaving most repository types unverified for thesis scoping and deterministic listing behavior.",
+    "issues": [
+      {
+        "file": "packages/db/src/repositories/domain.test.ts",
+        "line": 59,
+        "severity": "blocking",
+        "description": "The persistence-contract test only verifies scoped listing and deterministic ordering on `checkpoints`, plus `theses.findById` and `policyProfiles.findActive`. The feature requirement says later API work should treat these package tests as the persistence contract for thesis-domain repository boundaries, but there is no coverage showing that other thesis-scoped repositories (for example `feedbackEntries`, `workflowTasks`, `normalizedNodes`, `sources`, `claims`, or `zoteroMappings`) actually enforce thesis scoping or deterministic list ordering through the shared generic repository helper. A regression in any of those repositories would currently pass this feature's tests despite violating the promised boundary contract.`"
+      }
+    ]
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed the mission docs, handoff, commit diff, transcript skeleton, backend-worker skill, and shared state notes. The implementation usefully introduces a repository registry plus ID/timestamp helpers, but it does not fully satisfy the expected persistence-contract coverage because repository boundary behavior is only proven for a narrow subset of repositories."
+}
