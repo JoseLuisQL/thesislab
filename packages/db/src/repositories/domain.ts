@@ -17,6 +17,7 @@ import type {
   ComplianceIssueRepository,
   ComplianceRunRecord,
   ComplianceRunRepository,
+  DomainRepositoryRegistry,
   DomainRepositories,
   EvidenceFragmentRecord,
   EvidenceFragmentRepository,
@@ -70,6 +71,7 @@ import {
   zoteroMappings,
 } from '../schema.js';
 import { GenericSqliteRepository } from './generic.js';
+import { createPersistenceHelpers } from './helpers.js';
 
 class ThesisSqliteRepository
   extends GenericSqliteRepository<ThesisRecord>
@@ -189,5 +191,12 @@ export function createDomainRepositories(db: ThesisDbClient): DomainRepositories
     academicQaRuns: new AcademicQaRunSqliteRepository(db, academicQaRuns),
     academicQaIssues: new AcademicQaIssueSqliteRepository(db, academicQaIssues),
     buildRuns: new BuildRunSqliteRepository(db, buildRuns),
+  };
+}
+
+export function createDomainRepositoryRegistry(db: ThesisDbClient): DomainRepositoryRegistry {
+  return {
+    repositories: createDomainRepositories(db),
+    helpers: createPersistenceHelpers(),
   };
 }

@@ -1,7 +1,7 @@
 import { asc, desc, eq } from 'drizzle-orm';
 import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
 
-import type { EntityId, Repository } from '../contracts.js';
+import type { EntityId, Repository, ThesisScopedRecord } from '../contracts.js';
 import type { ThesisDbClient } from '../client.js';
 
 type TableWithId = SQLiteTable;
@@ -25,27 +25,37 @@ export class GenericSqliteRepository<TRecord> implements Repository<TRecord> {
   }
 
   async listByThesisId(thesisId: EntityId) {
-    const table = this.table as typeof this.table & {
-      thesisId?: unknown;
-      createdAt?: unknown;
-      id: unknown;
-    };
-
-    if (!('thesisId' in table)) {
-      return [] as TRecord[];
-    }
-
-    const createdAtColumn = 'createdAt' in table ? (table.createdAt as never) : undefined;
-
-    const query = this.db
-      .select()
-      .from(table)
-      .where(eq(table.thesisId as never, thesisId));
-
-    const rows = createdAtColumn
-      ? query.orderBy(desc(createdAtColumn)).all()
-      : query.orderBy(asc(table.id as never)).all();
-
-    return (await rows) as unknown as TRecord[];
+    return listByThesisId(this.db, this.table, thesisId) as Promise<TRecord[]>;
   }
+}
+
+export function listByThesisId<TRecord extends ThesisScopedRecord>(
+  db: ThesisDbClient,
+  table: TableWithId,
+  thesisId: EntityId,
+): Promise<TRecord[]> {
+  const thesisScopedTable = table as typeof table & {
+    thesisId?: unknown;
+    createdAt?: unknown;
+    id: unknown;
+  };
+
+  if (!('thesisId' in thesisScopedTable)) {
+    return Promise.resolve([] as TRecord[]);
+  }
+
+  const createdAtColumn = 'createdAt' in thesisScopedTable
+    ? (thesisScopedTable.createdAt as never)
+    : undefined;
+
+  const query = db
+    .select()
+    .from(thesisScopedTable)
+    .where(eq(thesisScopedTable.thesisId as never, thesisId));
+
+  const rows = createdAtColumn
+    ? query.orderBy(desc(createdAtColumn), asc(thesisScopedTable.id as never)).all()
+    : query.orderBy(asc(thesisScopedTable.id as never)).all();
+
+  return rows as unknown as Promise<TRecord[]>;
 }

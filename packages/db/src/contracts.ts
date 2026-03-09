@@ -1,9 +1,17 @@
 export type EntityId = string;
 
+export type ThesisScopedRecord = {
+  thesisId: EntityId;
+};
+
 export type TimestampFields = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type PersistedRecord = {
+  id: EntityId;
+} & TimestampFields;
 
 export type ThesisLifecycleState =
   | 'draft'
@@ -295,6 +303,11 @@ export interface Repository<TRecord> {
   listByThesisId?(thesisId: EntityId): Promise<TRecord[]>;
 }
 
+export interface PersistenceHelpers {
+  createId(): EntityId;
+  now(): string;
+}
+
 export interface ThesisRepository extends Repository<ThesisRecord> {}
 export interface ThesisStateRepository extends Repository<ThesisStateRecord> {}
 export interface WorkflowTaskRepository extends Repository<WorkflowTaskRecord> {}
@@ -342,4 +355,9 @@ export interface DomainRepositories {
   academicQaRuns: AcademicQaRunRepository;
   academicQaIssues: AcademicQaIssueRepository;
   buildRuns: BuildRunRepository;
+}
+
+export interface DomainRepositoryRegistry {
+  repositories: DomainRepositories;
+  helpers: PersistenceHelpers;
 }
