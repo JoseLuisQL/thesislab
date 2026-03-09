@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -96,5 +97,82 @@ describe('schema migrations', () => {
     expect(policy?.isActive).toBe(true);
 
     connection.sqlite.close();
+  });
+
+  it('rejects orphaned cross-entity references through enforced foreign keys', () => {
+    const databaseUrl = createTempDatabaseUrl('thesis-db-relations-');
+    const databasePath = path.resolve('/root/thesislab', databaseUrl.slice('file:'.length));
+    const migrationPaths = [
+      path.resolve(import.meta.dirname, '../drizzle/0001_unknown_komodo.sql'),
+    ];
+
+    const seedSql = [
+      "INSERT INTO theses (id, title, slug, degree_program, institution, workspace_path, default_language, current_state, latest_status_at, next_step_summary) VALUES ('thesis-1', 'Relational Integrity Thesis', 'relational-integrity-thesis', 'MSc Computer Science', 'Universidad Demo', '/tmp/thesis-1', 'es', 'draft', '2026-03-09T00:00:00.000Z', 'Validar relaciones.')",
+      "INSERT INTO policy_profiles (id, institution, faculty, version, title, required_sections_json, rule_definitions_json, is_active) VALUES ('policy-1', 'Universidad Demo', 'Ingeniería', '2026.1', 'Perfil principal', '[]', '[]', 1)",
+      "INSERT INTO checkpoints (id, thesis_id, label, note, scope, reason, snapshot_path, created_by, checkpointed_at) VALUES ('checkpoint-1', 'thesis-1', 'Base checkpoint', NULL, 'workspace', 'seed', NULL, 'test', '2026-03-09T00:00:00.000Z')",
+      "INSERT INTO workflow_tasks (id, thesis_id, parent_task_id, title, intent, status, priority, sort_order, due_at, active_checkpoint_id) VALUES ('task-1', 'thesis-1', NULL, 'Primary task', 'Verify thesis flow', 'active', 1, 1, NULL, NULL)",
+      "INSERT INTO workflow_tasks (id, thesis_id, parent_task_id, title, intent, status, priority, sort_order, due_at, active_checkpoint_id) VALUES ('task-2', 'thesis-1', 'task-1', 'Child task', 'Verify nested thesis flow', 'pending', 2, 2, NULL, NULL)",
+      "INSERT INTO workflow_packs (id, thesis_id, name, description, status, current_step_id) VALUES ('pack-1', 'thesis-1', 'Pack', 'Workflow pack', 'active', NULL)",
+      "INSERT INTO normalized_nodes (id, thesis_id, intake_job_id, parent_node_id, node_type, title, content, ordinal, source_path, source_start, source_end, provenance_kind, provenance_json) VALUES ('node-1', 'thesis-1', NULL, NULL, 'chapter', 'Introducción', 'Contenido', 1, 'main.tex', '1', '10', 'latex', '{}')",
+      "INSERT INTO normalized_nodes (id, thesis_id, intake_job_id, parent_node_id, node_type, title, content, ordinal, source_path, source_start, source_end, provenance_kind, provenance_json) VALUES ('node-2', 'thesis-1', NULL, 'node-1', 'section', 'Marco teórico', 'Más contenido', 2, 'chapter1.tex', '11', '20', 'latex', '{}')",
+      "INSERT INTO sources (id, thesis_id, source_type, title, authors_json, publication_year, locator, status, ingest_metadata_json) VALUES ('source-1', 'thesis-1', 'article', 'A source', '[\"Ada\"]', 2024, 'doi:demo', 'ready', '{}')",
+      "INSERT INTO evidence_fragments (id, thesis_id, source_id, normalized_node_id, task_id, locator, snippet, extraction_method, confidence, status, provenance_json) VALUES ('evidence-1', 'thesis-1', 'source-1', 'node-2', 'task-2', 'p. 4', 'Important evidence', 'manual', 0.9, 'linked', '{}')",
+      "INSERT INTO claims (id, thesis_id, normalized_node_id, text, status, support_summary) VALUES ('claim-1', 'thesis-1', 'node-2', 'A defensible claim', 'draft', 'Needs support')",
+      "INSERT INTO compliance_runs (id, thesis_id, policy_profile_id, status, summary_json, evaluated_rule_count, warning_rule_count, skipped_rule_count, started_at, completed_at) VALUES ('compliance-run-1', 'thesis-1', 'policy-1', 'completed', '{}', 1, 0, 0, '2026-03-09T00:22:00.000Z', '2026-03-09T00:23:00.000Z')",
+      "INSERT INTO compliance_issues (id, thesis_id, compliance_run_id, policy_profile_id, rule_id, normalized_node_id, severity, message, remediation, disposition) VALUES ('compliance-issue-1', 'thesis-1', 'compliance-run-1', 'policy-1', 'rule-1', 'node-2', 'warning', 'Missing section detail', 'Add detail', 'warning')",
+      "INSERT INTO academic_qa_runs (id, thesis_id, status, assessed_scope_json, skipped_scope_json, summary_json, started_at, completed_at) VALUES ('qa-run-1', 'thesis-1', 'completed', '{}', '{}', '{}', '2026-03-09T00:24:00.000Z', '2026-03-09T00:25:00.000Z')",
+      "INSERT INTO academic_qa_issues (id, thesis_id, academic_qa_run_id, claim_id, normalized_node_id, category, severity, message, rationale, remediation, triggering_condition) VALUES ('qa-issue-1', 'thesis-1', 'qa-run-1', 'claim-1', 'node-2', 'evidence-gap', 'warning', 'Need more evidence', 'Only one source attached', 'Attach more sources', 'low-support')",
+      "INSERT INTO zotero_mappings (id, thesis_id, normalized_node_id, source_id, scope, library_id, collection_key, item_key, normalized_data_json, connector_status, last_synced_at) VALUES ('zotero-1', 'thesis-1', 'node-2', 'source-1', 'thesis', 'library-1', 'collection-1', 'item-1', '{}', 'mocked', '2026-03-09T00:15:00.000Z')",
+      "INSERT INTO build_runs (id, thesis_id, checkpoint_id, status, engine, artifact_path, diagnostics_json, bibliography_status, started_at, completed_at, is_latest_successful) VALUES ('build-1', 'thesis-1', 'checkpoint-1', 'success', 'latexmk', '/tmp/output.pdf', '{}', 'ok', '2026-03-09T00:20:00.000Z', '2026-03-09T00:21:00.000Z', 1)",
+    ];
+
+    const invalidSql = [
+      "INSERT INTO evidence_fragments (id, thesis_id, source_id, normalized_node_id, task_id, locator, snippet, extraction_method, confidence, status, provenance_json) VALUES ('evidence-invalid', 'thesis-1', 'source-1', 'missing-node', 'task-2', NULL, 'Broken evidence', 'manual', NULL, 'linked', '{}')",
+      "INSERT INTO claims (id, thesis_id, normalized_node_id, text, status, support_summary) VALUES ('claim-invalid', 'thesis-1', 'missing-node', 'Broken claim', 'draft', '')",
+      "INSERT INTO zotero_mappings (id, thesis_id, normalized_node_id, source_id, scope, library_id, collection_key, item_key, normalized_data_json, connector_status, last_synced_at) VALUES ('zotero-invalid', 'thesis-1', 'missing-node', 'source-1', 'thesis', 'library-1', NULL, NULL, '{}', 'mocked', NULL)",
+      "INSERT INTO compliance_issues (id, thesis_id, compliance_run_id, policy_profile_id, rule_id, normalized_node_id, severity, message, remediation, disposition) VALUES ('compliance-issue-invalid', 'thesis-1', 'compliance-run-1', 'policy-1', 'rule-1', 'missing-node', 'warning', 'Broken issue', NULL, 'warning')",
+      "INSERT INTO academic_qa_issues (id, thesis_id, academic_qa_run_id, claim_id, normalized_node_id, category, severity, message, rationale, remediation, triggering_condition) VALUES ('qa-issue-invalid-claim', 'thesis-1', 'qa-run-1', 'missing-claim', 'node-2', 'evidence-gap', 'warning', 'Broken qa issue', 'Missing claim', NULL, 'low-support')",
+      "INSERT INTO build_runs (id, thesis_id, checkpoint_id, status, engine, artifact_path, diagnostics_json, bibliography_status, started_at, completed_at, is_latest_successful) VALUES ('build-invalid', 'thesis-1', 'missing-checkpoint', 'failed', 'latexmk', NULL, '{}', 'unknown', '2026-03-09T00:30:00.000Z', NULL, 0)",
+    ];
+
+    const pythonScript = String.raw`
+import json
+import sqlite3
+import sys
+
+migration_sql = ''
+for migration_path in json.loads(sys.argv[2]):
+    with open(migration_path, 'r', encoding='utf-8') as handle:
+        migration_sql += handle.read().replace('--> statement-breakpoint', ';') + '\n'
+
+seed_sql = json.loads(sys.argv[3])
+invalid_sql = json.loads(sys.argv[4])
+
+conn = sqlite3.connect(sys.argv[1])
+conn.execute('PRAGMA foreign_keys = ON')
+conn.executescript(migration_sql)
+
+for statement in seed_sql:
+    conn.execute(statement)
+
+for statement in invalid_sql:
+    try:
+        conn.execute(statement)
+    except sqlite3.IntegrityError as exc:
+        if 'FOREIGN KEY constraint failed' not in str(exc):
+            raise AssertionError(f'Unexpected integrity error: {exc}') from exc
+    else:
+        raise AssertionError(f'Expected foreign key failure for SQL: {statement}')
+
+conn.close()
+`;
+
+    expect(() => {
+      execFileSync(
+        'python3',
+        ['-c', pythonScript, databasePath, JSON.stringify(migrationPaths), JSON.stringify(seedSql), JSON.stringify(invalidSql)],
+        { stdio: 'pipe' },
+      );
+    }).not.toThrow();
   });
 });
