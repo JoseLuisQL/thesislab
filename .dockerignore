@@ -1,0 +1,8 @@
+.git
+node_modules
+dist
+.factory/tmp
+.factory/logs
+.factory/state
+artifacts
+coverage

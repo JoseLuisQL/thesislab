@@ -1,0 +1,11 @@
+.factory/tmp/
+.factory/logs/
+.factory/state/
+artifacts/
+data/
+.env
+node_modules/
+dist/
+.pnpm-store/
+coverage/
+*.tsbuildinfo

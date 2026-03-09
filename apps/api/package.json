@@ -1,0 +1,24 @@
+{
+  "name": "@thesis-research-os/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch src/server.ts",
+    "lint": "tsc --noEmit -p tsconfig.json --moduleResolution node16 --module node16",
+    "test": "vitest run",
+    "test:ci": "vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.json --moduleResolution node16 --module node16"
+  },
+  "dependencies": {
+    "@thesis-research-os/shared": "workspace:*",
+    "fastify": "^5.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.8"
+  }
+}
