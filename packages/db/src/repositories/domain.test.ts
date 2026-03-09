@@ -13,6 +13,9 @@ import {
   policyProfiles,
   sources,
   theses,
+  workflowPacks,
+  workflowSteps,
+  workflowTaskCheckpoints,
   workflowTasks,
   zoteroMappings,
 } from '../schema.js';
@@ -410,6 +413,180 @@ describe('domain repository boundaries', () => {
       },
     ]);
 
+    await connection.db.insert(workflowTaskCheckpoints).values([
+      {
+        id: 'task-checkpoint-alpha-newer',
+        thesisId: thesisAId,
+        taskId: 'task-alpha-newer',
+        label: 'Newest alpha task checkpoint',
+        summary: 'Newest progress update',
+        progressPercent: 90,
+        blocker: null,
+        checkpointedAt: '2026-03-09T09:20:00.000Z',
+        createdAt: '2026-03-09T09:20:00.000Z',
+        updatedAt: '2026-03-09T09:20:00.000Z',
+      },
+      {
+        id: 'task-checkpoint-alpha-older',
+        thesisId: thesisAId,
+        taskId: 'task-alpha-older',
+        label: 'Older alpha task checkpoint',
+        summary: 'Older progress update',
+        progressPercent: 40,
+        blocker: 'Needs input',
+        checkpointedAt: '2026-03-09T09:15:00.000Z',
+        createdAt: '2026-03-09T09:15:00.000Z',
+        updatedAt: '2026-03-09T09:15:00.000Z',
+      },
+      {
+        id: 'task-checkpoint-alpha-same-time-b',
+        thesisId: thesisAId,
+        taskId: 'task-alpha-same-time-b',
+        label: 'Alpha task checkpoint B',
+        summary: 'Tie break B',
+        progressPercent: 10,
+        blocker: null,
+        checkpointedAt: '2026-03-09T09:00:00.000Z',
+        createdAt: '2026-03-09T09:00:00.000Z',
+        updatedAt: '2026-03-09T09:00:00.000Z',
+      },
+      {
+        id: 'task-checkpoint-alpha-same-time-a',
+        thesisId: thesisAId,
+        taskId: 'task-alpha-same-time-a',
+        label: 'Alpha task checkpoint A',
+        summary: 'Tie break A',
+        progressPercent: 20,
+        blocker: null,
+        checkpointedAt: '2026-03-09T09:00:00.000Z',
+        createdAt: '2026-03-09T09:00:00.000Z',
+        updatedAt: '2026-03-09T09:00:00.000Z',
+      },
+      {
+        id: 'task-checkpoint-beta-only',
+        thesisId: thesisBId,
+        taskId: 'task-beta-only',
+        label: 'Beta only task checkpoint',
+        summary: 'Beta progress update',
+        progressPercent: 70,
+        blocker: null,
+        checkpointedAt: '2026-03-09T11:06:00.000Z',
+        createdAt: '2026-03-09T11:06:00.000Z',
+        updatedAt: '2026-03-09T11:06:00.000Z',
+      },
+    ]);
+
+    await connection.db.insert(workflowPacks).values([
+      {
+        id: 'workflow-pack-alpha-newer',
+        thesisId: thesisAId,
+        name: 'Newest alpha pack',
+        description: 'Newest workflow pack',
+        status: 'in_progress',
+        currentStepId: null,
+        createdAt: '2026-03-09T08:50:00.000Z',
+        updatedAt: '2026-03-09T08:50:00.000Z',
+      },
+      {
+        id: 'workflow-pack-alpha-older',
+        thesisId: thesisAId,
+        name: 'Older alpha pack',
+        description: 'Older workflow pack',
+        status: 'pending',
+        currentStepId: null,
+        createdAt: '2026-03-09T08:45:00.000Z',
+        updatedAt: '2026-03-09T08:45:00.000Z',
+      },
+      {
+        id: 'workflow-pack-alpha-same-time-b',
+        thesisId: thesisAId,
+        name: 'Alpha pack B',
+        description: 'Tie break B',
+        status: 'blocked',
+        currentStepId: null,
+        createdAt: '2026-03-09T08:40:00.000Z',
+        updatedAt: '2026-03-09T08:40:00.000Z',
+      },
+      {
+        id: 'workflow-pack-alpha-same-time-a',
+        thesisId: thesisAId,
+        name: 'Alpha pack A',
+        description: 'Tie break A',
+        status: 'completed',
+        currentStepId: null,
+        createdAt: '2026-03-09T08:40:00.000Z',
+        updatedAt: '2026-03-09T08:40:00.000Z',
+      },
+      {
+        id: 'workflow-pack-beta-only',
+        thesisId: thesisBId,
+        name: 'Beta only pack',
+        description: 'Isolation',
+        status: 'in_progress',
+        currentStepId: null,
+        createdAt: '2026-03-09T11:07:00.000Z',
+        updatedAt: '2026-03-09T11:07:00.000Z',
+      },
+    ]);
+
+    await connection.db.insert(workflowSteps).values([
+      {
+        id: 'workflow-step-alpha-newer',
+        thesisId: thesisAId,
+        workflowPackId: 'workflow-pack-alpha-newer',
+        title: 'Newest alpha step',
+        description: 'Newest workflow step',
+        status: 'in_progress',
+        stepOrder: 1,
+        createdAt: '2026-03-09T08:55:00.000Z',
+        updatedAt: '2026-03-09T08:55:00.000Z',
+      },
+      {
+        id: 'workflow-step-alpha-older',
+        thesisId: thesisAId,
+        workflowPackId: 'workflow-pack-alpha-older',
+        title: 'Older alpha step',
+        description: 'Older workflow step',
+        status: 'pending',
+        stepOrder: 2,
+        createdAt: '2026-03-09T08:52:00.000Z',
+        updatedAt: '2026-03-09T08:52:00.000Z',
+      },
+      {
+        id: 'workflow-step-alpha-same-time-b',
+        thesisId: thesisAId,
+        workflowPackId: 'workflow-pack-alpha-same-time-b',
+        title: 'Alpha step B',
+        description: 'Tie break B',
+        status: 'blocked',
+        stepOrder: 3,
+        createdAt: '2026-03-09T08:48:00.000Z',
+        updatedAt: '2026-03-09T08:48:00.000Z',
+      },
+      {
+        id: 'workflow-step-alpha-same-time-a',
+        thesisId: thesisAId,
+        workflowPackId: 'workflow-pack-alpha-same-time-a',
+        title: 'Alpha step A',
+        description: 'Tie break A',
+        status: 'completed',
+        stepOrder: 4,
+        createdAt: '2026-03-09T08:48:00.000Z',
+        updatedAt: '2026-03-09T08:48:00.000Z',
+      },
+      {
+        id: 'workflow-step-beta-only',
+        thesisId: thesisBId,
+        workflowPackId: 'workflow-pack-beta-only',
+        title: 'Beta only step',
+        description: 'Isolation',
+        status: 'in_progress',
+        stepOrder: 1,
+        createdAt: '2026-03-09T11:08:00.000Z',
+        updatedAt: '2026-03-09T11:08:00.000Z',
+      },
+    ]);
+
     await connection.db.insert(normalizedNodes).values([
       {
         id: 'node-alpha-newer',
@@ -699,6 +876,9 @@ describe('domain repository boundaries', () => {
 
     const thesisAFeedbackEntries = await registry.repositories.feedbackEntries.listByThesisId?.(thesisAId);
     const thesisAWorkflowTasks = await registry.repositories.workflowTasks.listByThesisId?.(thesisAId);
+    const thesisAWorkflowTaskCheckpoints = await registry.repositories.workflowTaskCheckpoints.listByThesisId?.(thesisAId);
+    const thesisAWorkflowPacks = await registry.repositories.workflowPacks.listByThesisId?.(thesisAId);
+    const thesisAWorkflowSteps = await registry.repositories.workflowSteps.listByThesisId?.(thesisAId);
     const thesisANormalizedNodes = await registry.repositories.normalizedNodes.listByThesisId?.(thesisAId);
     const thesisASources = await registry.repositories.sources.listByThesisId?.(thesisAId);
     const thesisAClaims = await registry.repositories.claims.listByThesisId?.(thesisAId);
@@ -706,6 +886,9 @@ describe('domain repository boundaries', () => {
 
     const thesisBFeedbackEntries = await registry.repositories.feedbackEntries.listByThesisId?.(thesisBId);
     const thesisBWorkflowTasks = await registry.repositories.workflowTasks.listByThesisId?.(thesisBId);
+    const thesisBWorkflowTaskCheckpoints = await registry.repositories.workflowTaskCheckpoints.listByThesisId?.(thesisBId);
+    const thesisBWorkflowPacks = await registry.repositories.workflowPacks.listByThesisId?.(thesisBId);
+    const thesisBWorkflowSteps = await registry.repositories.workflowSteps.listByThesisId?.(thesisBId);
     const thesisBNormalizedNodes = await registry.repositories.normalizedNodes.listByThesisId?.(thesisBId);
     const thesisBSources = await registry.repositories.sources.listByThesisId?.(thesisBId);
     const thesisBClaims = await registry.repositories.claims.listByThesisId?.(thesisBId);
@@ -722,6 +905,24 @@ describe('domain repository boundaries', () => {
       'task-alpha-older',
       'task-alpha-same-time-a',
       'task-alpha-same-time-b',
+    ]);
+    expect(thesisAWorkflowTaskCheckpoints?.map((checkpoint) => checkpoint.id)).toEqual([
+      'task-checkpoint-alpha-newer',
+      'task-checkpoint-alpha-older',
+      'task-checkpoint-alpha-same-time-a',
+      'task-checkpoint-alpha-same-time-b',
+    ]);
+    expect(thesisAWorkflowPacks?.map((pack) => pack.id)).toEqual([
+      'workflow-pack-alpha-newer',
+      'workflow-pack-alpha-older',
+      'workflow-pack-alpha-same-time-a',
+      'workflow-pack-alpha-same-time-b',
+    ]);
+    expect(thesisAWorkflowSteps?.map((step) => step.id)).toEqual([
+      'workflow-step-alpha-newer',
+      'workflow-step-alpha-older',
+      'workflow-step-alpha-same-time-a',
+      'workflow-step-alpha-same-time-b',
     ]);
     expect(thesisANormalizedNodes?.map((node) => node.id)).toEqual([
       'node-alpha-newer',
@@ -750,6 +951,9 @@ describe('domain repository boundaries', () => {
 
     expect(thesisBFeedbackEntries?.map((entry) => entry.id)).toEqual(['feedback-beta-only']);
     expect(thesisBWorkflowTasks?.map((task) => task.id)).toEqual(['task-beta-only']);
+    expect(thesisBWorkflowTaskCheckpoints?.map((checkpoint) => checkpoint.id)).toEqual(['task-checkpoint-beta-only']);
+    expect(thesisBWorkflowPacks?.map((pack) => pack.id)).toEqual(['workflow-pack-beta-only']);
+    expect(thesisBWorkflowSteps?.map((step) => step.id)).toEqual(['workflow-step-beta-only']);
     expect(thesisBNormalizedNodes?.map((node) => node.id)).toEqual(['node-beta-only']);
     expect(thesisBSources?.map((source) => source.id)).toEqual(['source-beta-only']);
     expect(thesisBClaims?.map((claim) => claim.id)).toEqual(['claim-beta-only']);
