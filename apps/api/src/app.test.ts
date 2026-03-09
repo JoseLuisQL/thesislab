@@ -65,3 +65,129 @@ describe('API port contract', () => {
     expect(resolveApiPort()).toBe(3100);
   });
 });
+
+describe('GET /status/capabilities', () => {
+  const app = createApp();
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  it('returns local-first posture with explicit core workflow capabilities', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/status/capabilities',
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const payload = response.json() as {
+      ok: boolean;
+      service: string;
+      mission: string;
+      timestamp: string;
+      posture: {
+        mode: string;
+        state: string;
+        summary: string;
+      };
+      workflows: Array<{
+        key: string;
+        state: string;
+        kind: string;
+        localFirst: boolean;
+      }>;
+      integrations: Array<{
+        key: string;
+        state: string;
+        kind: string;
+        optional: boolean;
+      }>;
+    };
+
+    expect(payload.ok).toBe(true);
+    expect(payload.service).toBe('api');
+    expect(payload.mission).toBe('misc-foundation-followup');
+    expect(payload.posture).toMatchObject({
+      mode: 'local-first',
+      state: 'ready',
+    });
+    expect(() => new Date(payload.timestamp).toISOString()).not.toThrow();
+    expect(payload.workflows).toEqual([
+      expect.objectContaining({
+        key: 'create',
+        state: 'available',
+        kind: 'core',
+        localFirst: true,
+      }),
+      expect.objectContaining({
+        key: 'intake',
+        state: 'available',
+        kind: 'core',
+        localFirst: true,
+      }),
+      expect.objectContaining({
+        key: 'resume',
+        state: 'available',
+        kind: 'core',
+        localFirst: true,
+      }),
+      expect.objectContaining({
+        key: 'latex',
+        state: 'available',
+        kind: 'core',
+        localFirst: true,
+      }),
+      expect.objectContaining({
+        key: 'qa',
+        state: 'available',
+        kind: 'core',
+        localFirst: true,
+      }),
+    ]);
+    expect(payload.integrations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'zotero',
+          state: 'degraded',
+          kind: 'integration',
+          optional: true,
+        }),
+        expect.objectContaining({
+          key: 'connectors',
+          state: 'degraded',
+          kind: 'integration',
+          optional: true,
+        }),
+      ]),
+    );
+  });
+
+  it('surfaces explicit degraded Zotero status from connector mode', async () => {
+    vi.stubEnv('ZOTERO_CONNECTOR_MODE', 'offline');
+    const response = await app.inject({
+      method: 'GET',
+      url: '/status/capabilities',
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const payload = response.json() as {
+      integrations: Array<{
+        key: string;
+        state: string;
+        summary: string;
+        detail: string;
+      }>;
+    };
+
+    expect(payload.integrations).toContainEqual(
+      expect.objectContaining({
+        key: 'zotero',
+        state: 'degraded',
+        summary: 'Connector not fully attached',
+        detail: expect.stringContaining('offline'),
+      }),
+    );
+  });
+});
