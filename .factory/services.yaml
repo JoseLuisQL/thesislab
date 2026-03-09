@@ -1,0 +1,26 @@
+commands:
+  install: ./.factory/bin/node-toolchain.sh install
+  test: ./.factory/bin/node-toolchain.sh test
+  lint: ./.factory/bin/node-toolchain.sh lint
+  typecheck: ./.factory/bin/node-toolchain.sh typecheck
+  build: ./.factory/bin/node-toolchain.sh build
+  db_migrate: ./.factory/bin/node-toolchain.sh db:migrate
+  validate_api: curl -sf http://localhost:3100/health
+  validate_web: curl -sf http://localhost:3101
+  latex_build: ./.factory/bin/doc-tool.sh latex-build
+  pandoc_probe: ./.factory/bin/doc-tool.sh pandoc-probe
+
+services:
+  api:
+    start: ./.factory/bin/dev-service.sh start api 3100
+    stop: ./.factory/bin/dev-service.sh stop api 3100
+    healthcheck: curl -sf http://localhost:3100/health
+    port: 3100
+    depends_on: []
+
+  web:
+    start: ./.factory/bin/dev-service.sh start web 3101
+    stop: ./.factory/bin/dev-service.sh stop web 3101
+    healthcheck: curl -sf http://localhost:3101
+    port: 3101
+    depends_on: [api]
