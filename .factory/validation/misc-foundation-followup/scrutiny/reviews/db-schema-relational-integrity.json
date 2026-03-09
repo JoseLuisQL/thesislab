@@ -1,0 +1,34 @@
+{
+  "featureId": "db-schema-relational-integrity",
+  "reviewedAt": "2026-03-09T18:59:27Z",
+  "commitId": "3ecf432",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The feature added the intended foreign keys and regenerated Drizzle artifacts, but it still leaves `workflow_steps.workflow_pack_id` without an actual SQLite foreign-key constraint even though the schema relations model and domain imply that dependency.",
+    "issues": [
+      {
+        "file": "packages/db/src/schema.ts",
+        "line": 86,
+        "severity": "blocking",
+        "description": "`workflow_steps.workflow_pack_id` is still declared as a plain `text(...).notNull()` column instead of referencing `workflow_packs.id`. This orphanable relationship is part of the domain model (`workflowPack` relation exists in the same file), so the feature does not fully satisfy the stated intent to add the missing SQLite foreign-key constraints where the domain implies them. The regenerated migration confirms the FK is still absent from `workflow_steps`."
+      },
+      {
+        "file": "packages/db/src/schema.test.ts",
+        "line": 92,
+        "severity": "non_blocking",
+        "description": "The regression test proves several orphan-reference failures, but it does not cover the still-unconstrained `workflow_steps.workflow_pack_id` path. Adding a negative case for an orphan workflow step would have exposed the remaining gap directly."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The backend-worker skill says to write failing tests first and to add deterministic migrations, but the worker had to improvise a temporary runtime-compatible Drizzle config helper because the documented workflow does not explain how to run `drizzle-kit generate` against this package's TS/ESM config setup in Docker.",
+      "evidence": "Handoff skillFeedback marks `followedProcedure` false and explains that `drizzle.config.ts/js` imports `./src/config.js`, which was not directly loadable by drizzle-kit in this environment; suggestedChanges asks for a stable mission-approved generation path."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Review failed: most intended relational constraints were added and tested, but `workflow_steps.workflow_pack_id` remains unenforced in both schema and generated SQLite migration, so orphan workflow steps can still persist despite the feature goal."
+}

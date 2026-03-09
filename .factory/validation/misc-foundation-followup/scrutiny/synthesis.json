@@ -1,0 +1,48 @@
+{
+  "milestone": "misc-foundation-followup",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "./.factory/bin/node-toolchain.sh test",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "./.factory/bin/node-toolchain.sh typecheck",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "./.factory/bin/node-toolchain.sh lint",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 3,
+    "passed": 2,
+    "failed": 1,
+    "failedFeatures": [
+      "db-schema-relational-integrity"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "db-schema-relational-integrity",
+      "severity": "blocking",
+      "description": "`packages/db/src/schema.ts` still leaves `workflow_steps.workflow_pack_id` unconstrained, and the regenerated migration omits the corresponding SQLite foreign key, so orphan workflow steps can still persist despite the feature's stated relational-integrity scope."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "skills",
+      "suggestion": "Update the backend-worker skill with a stable, mission-approved procedure for running `drizzle-kit generate` against the repo's TS/ESM `packages/db` configuration in Docker so workers do not need ad-hoc config workarounds.",
+      "evidence": "The `db-schema-relational-integrity` review reported that the worker had to improvise a temporary runtime-compatible Drizzle config helper because the documented workflow did not explain how to generate migrations for this package setup under Docker.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}
