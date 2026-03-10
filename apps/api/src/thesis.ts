@@ -1177,8 +1177,9 @@ function parseJsonObject(value: string): Record<string, unknown> | null {
 }
 
 function canonicalizeInsideBoundary(workspacePath: string, importRootPath: string, thesisId: string) {
-  const boundaryRoot = resolveBoundaryRoot(workspacePath, importRootPath);
-  const requestedAbsolute = resolveImportRootPath(boundaryRoot, importRootPath);
+  const translatedImportRootPath = translateHostPathToMountedRoot(path.resolve(importRootPath)) ?? importRootPath;
+  const boundaryRoot = resolveBoundaryRoot(workspacePath, translatedImportRootPath);
+  const requestedAbsolute = resolveImportRootPath(boundaryRoot, translatedImportRootPath);
   const resolved = resolveExistingPath(requestedAbsolute);
   const relative = path.relative(boundaryRoot, resolved);
 
@@ -1276,8 +1277,32 @@ function resolveAbsoluteImportRootPath(importRootPath: string) {
     return directPath;
   }
 
+  const translatedHostPath = translateHostPathToMountedRoot(directPath);
+  if (translatedHostPath && fs.existsSync(translatedHostPath)) {
+    return translatedHostPath;
+  }
+
   const mappedPath = mapWorkspacePathToMountedRoot(importRootPath);
   return fs.existsSync(mappedPath) ? mappedPath : directPath;
+}
+
+function translateHostPathToMountedRoot(targetPath: string) {
+  const configuredRepoRoot = process.env.HOST_REPO_ROOT?.trim();
+
+  if (!configuredRepoRoot) {
+    return null;
+  }
+
+  const normalizedTarget = path.resolve(targetPath);
+  const normalizedHostRoot = path.resolve(configuredRepoRoot);
+  const relativeToHostRoot = path.relative(normalizedHostRoot, normalizedTarget);
+  const mountedRoot = mapWorkspacePathToMountedRoot(configuredRepoRoot);
+
+  if (relativeToHostRoot === '' || (!relativeToHostRoot.startsWith('..') && !path.isAbsolute(relativeToHostRoot))) {
+    return path.join(mountedRoot, relativeToHostRoot);
+  }
+
+  return null;
 }
 
 function resolveExistingPath(targetPath: string) {
@@ -1548,6 +1573,14 @@ function inspectLatexImport(importRootPath: string) {
     : [path.basename(importRootPath)];
   const rootDir = stats.isDirectory() ? importRootPath : path.dirname(importRootPath);
   const entrypoint = texFiles.find((entry) => entry.toLowerCase() === 'main.tex') ?? texFiles[0] ?? null;
+  let detectedEntrypoint = entrypoint;
+  let structureSummary: IntakeReportSummary['structureSummary'] = entrypoint
+    ? {
+        entrypoint,
+        itemCount: texFiles.length,
+        items: texFiles,
+      }
+    : null;
 
   if (!entrypoint) {
     failures.push({
@@ -1570,19 +1603,19 @@ function inspectLatexImport(importRootPath: string) {
       failures.push(...graph.failures);
       if (graph.failures.length === 0) {
         normalizedNodeSeed.push(...graph.nodes);
+        detectedEntrypoint = graph.entrypoint;
+        structureSummary = {
+          entrypoint: graph.entrypoint,
+          itemCount: graph.orderedFiles.length,
+          items: graph.orderedFiles,
+        };
       }
     }
   }
 
   return {
-    detectedEntrypoint: entrypoint,
-    structureSummary: entrypoint
-      ? {
-          entrypoint,
-          itemCount: texFiles.length,
-          items: texFiles,
-        }
-      : null,
+    detectedEntrypoint,
+    structureSummary,
     warnings,
     failures,
     normalizedNodes: failures.length === 0 ? normalizedNodeSeed : [],
@@ -1605,7 +1638,21 @@ function inspectDocxImport(importRootPath: string) {
       detail: importRootPath,
     });
   } else {
-    const xml = buffer.toString('utf8');
+    const xml = extractDocxDocumentXml(buffer);
+    if (!xml) {
+      failures.push({
+        code: 'DOCX_DOCUMENT_XML_MISSING',
+        message: 'The DOCX archive does not contain word/document.xml.',
+        detail: importRootPath,
+      });
+      return {
+        detectedEntrypoint: null,
+        structureSummary: null,
+        warnings,
+        failures,
+        normalizedNodes: [],
+      };
+    }
     const outline = extractDocxOutline(xml, path.basename(importRootPath));
     warnings.push(...outline.warnings);
     normalizedNodeSeed.push(...outline.nodes);
@@ -1756,7 +1803,21 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
 
   visitFile(fs.realpathSync(entrypoint));
 
-  return { nodes, warnings, failures, orderedFiles };
+  return { nodes, warnings, failures, orderedFiles, entrypoint: path.relative(rootDir, entrypoint) };
+}
+
+function extractDocxDocumentXml(buffer: Buffer) {
+  const content = buffer.toString('utf8');
+  const marker = '--ENTRY:word/document.xml--';
+  const markerIndex = content.indexOf(marker);
+
+  if (markerIndex === -1) {
+    return null;
+  }
+
+  const start = markerIndex + marker.length;
+  const nextMarkerIndex = content.indexOf('--ENTRY:', start);
+  return content.slice(start, nextMarkerIndex === -1 ? undefined : nextMarkerIndex);
 }
 
 function findNodeById(nodes: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>>, nodeId: string) {
@@ -1885,6 +1946,41 @@ function extractPdfOutline(text: string, fileName: string) {
     createdAt: baseNow,
     updatedAt: baseNow,
   });
+
+  const outlineEntries = [...text.matchAll(/^OUTLINE:(\d+):(.+)$/gm)].map((match) => ({
+    level: Number(match[1]),
+    title: match[2]!.trim(),
+  })).filter((entry) => entry.title.length > 0);
+
+  if (outlineEntries.length > 0) {
+    const stack: Array<{ level: number; id: string }> = [{ level: 0, id: documentId }];
+    outlineEntries.forEach((entry, idx) => {
+      const normalizedLevel = Math.max(1, Math.min(entry.level, 3));
+      while (stack.length > 0 && stack[stack.length - 1]!.level >= normalizedLevel) {
+        stack.pop();
+      }
+      const parentId = stack[stack.length - 1]?.id ?? documentId;
+      const nodeType = normalizedLevel === 1 ? 'chapter' : normalizedLevel === 2 ? 'section' : 'subsection';
+      const id = stableNodeId('pdf', fileName, nodeType, idx + 1, entry.title);
+      nodes.push({
+        id,
+        parentNodeId: parentId,
+        nodeType,
+        title: entry.title,
+        content: null,
+        sourcePath: fileName,
+        sourceStart: `outline:${idx + 1}`,
+        sourceEnd: `outline:${idx + 1}`,
+        provenanceKind: 'pdf',
+        provenanceJson: JSON.stringify({ kind: 'pdf', filePath: fileName, outlineIndex: idx + 1, level: normalizedLevel }),
+        createdAt: baseNow,
+        updatedAt: baseNow,
+      });
+      stack.push({ level: normalizedLevel, id });
+    });
+
+    return { warnings, nodes };
+  }
 
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const candidateLines = lines.filter((line) => /^[A-ZÁÉÍÓÚÑ0-9 .:-]{4,}$/.test(line));

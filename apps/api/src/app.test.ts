@@ -837,6 +837,63 @@ describe('thesis lifecycle registry routes', () => {
     });
   });
 
+  it('accepts host-style repo-root import paths on the live-style mounted service boundary', async () => {
+    const hostRepoRoot = '/root/thesislab';
+    const mountedWorkspaceRoot = process.cwd();
+    const relativeFixtureDir = path.join('tmp', 'live-hostpath-intake', 'latex-project');
+    const latexDir = path.join(mountedWorkspaceRoot, relativeFixtureDir);
+    fs.mkdirSync(latexDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'main.tex'),
+      '\\documentclass{report}\n\\begin{document}\n\\chapter{Importacion host}\n\\section{Ruta montada}\n\\end{document}\n',
+      'utf8',
+    );
+
+    vi.stubEnv('HOST_REPO_ROOT', hostRepoRoot);
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis ruta host montada',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: hostRepoRoot,
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: {
+        importRootPath: path.join(hostRepoRoot, relativeFixtureDir),
+      },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const intakePayload = intakeResponse.json() as {
+      intakeJob: {
+        status: string;
+        importRootPath: string;
+        report: {
+          terminalStatus: string;
+          replacement: null;
+        } | null;
+      };
+    };
+
+    expect(intakePayload.intakeJob.status).toBe('succeeded');
+    expect(intakePayload.intakeJob.importRootPath).toBe(latexDir);
+    expect(intakePayload.intakeJob.report).toMatchObject({
+      terminalStatus: 'succeeded',
+      replacement: null,
+    });
+  });
+
   it('makes re-import replacement semantics explicit and recoverable instead of silently overwriting the active workspace', async () => {
     const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-reimport-'));
     const latexDir = path.join(fixtureRoot, 'latex-project');
@@ -982,69 +1039,6 @@ describe('thesis lifecycle registry routes', () => {
     });
   });
 
-  it('maps host-style workspace roots through HOST_REPO_ROOT when intake runs inside the manifest-started container', async () => {
-    const hostRepoRoot = '/root/thesislab';
-    const containerRepoRoot = path.resolve(process.cwd(), '..', '..');
-    const tempRoot = path.join(containerRepoRoot, 'tmp');
-    fs.mkdirSync(tempRoot, { recursive: true });
-    const fixtureRoot = fs.mkdtempSync(path.join(tempRoot, 'intake-host-root-'));
-    const latexDir = path.join(fixtureRoot, 'latex-project');
-    fs.mkdirSync(latexDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(latexDir, 'main.tex'),
-      '\\documentclass{report}\n\\begin{document}\n\\chapter{Ruta host}\n\\section{Importación viva}\n\\end{document}\n',
-      'utf8',
-    );
-
-    const hostFixtureRoot = fixtureRoot.replace(containerRepoRoot, hostRepoRoot);
-    const hostLatexDir = latexDir.replace(containerRepoRoot, hostRepoRoot);
-    const previousHostRepoRoot = process.env.HOST_REPO_ROOT;
-    process.env.HOST_REPO_ROOT = hostRepoRoot;
-
-    try {
-      const createResponse = await app.inject({
-        method: 'POST',
-        url: '/theses',
-        payload: {
-          title: 'Tesis con raíz host',
-          degreeProgram: 'Máster en IA',
-          institution: 'Universidad Demo',
-          workspacePath: hostFixtureRoot,
-        },
-      });
-
-      expect(createResponse.statusCode).toBe(201);
-      const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
-
-      const intakeResponse = await app.inject({
-        method: 'POST',
-        url: `/theses/${thesisId}/intake-jobs`,
-        payload: { importRootPath: hostLatexDir },
-      });
-
-      expect(intakeResponse.statusCode).toBe(201);
-      const intakePayload = intakeResponse.json() as {
-        intakeJob: {
-          status: string;
-          report: {
-            terminalStatus: string;
-            structureSummary: { entrypoint: string | null } | null;
-          } | null;
-        };
-      };
-
-      expect(intakePayload.intakeJob.status).toBe('succeeded');
-      expect(intakePayload.intakeJob.report?.terminalStatus).toBe('succeeded');
-      expect(intakePayload.intakeJob.report?.structureSummary?.entrypoint).toBe('main.tex');
-    } finally {
-      if (previousHostRepoRoot === undefined) {
-        delete process.env.HOST_REPO_ROOT;
-      } else {
-        process.env.HOST_REPO_ROOT = previousHostRepoRoot;
-      }
-    }
-  });
-
   it('creates deterministic terminal intake jobs and reports explicit format detection for latex, docx, and pdf', async () => {
     const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-fixtures-'));
     const latexDir = path.join(fixtureRoot, 'latex-project');
@@ -1065,12 +1059,27 @@ describe('thesis lifecycle registry routes', () => {
       '\\documentclass{report}\n\\begin{document}\n\\input{chapter1}\n\\end{document}\n',
       'utf8',
     );
+    fs.writeFileSync(
+      path.join(latexDir, 'appendix.tex'),
+      '\\chapter{Apéndice}\nContenido que no debe entrar en el grafo.\n',
+      'utf8',
+    );
 
     const docxPath = path.join(fixtureRoot, 'outline.docx');
     fs.writeFileSync(
       docxPath,
       Buffer.from(
-        'PK\u0003\u0004word/document.xml<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Introducción</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Marco teórico</w:t></w:r></w:p>',
+        [
+          'PK\u0003\u0004',
+          '--ENTRY:word/document.xml--',
+          '<w:document>',
+          '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Introducción</w:t></w:r></w:p>',
+          '<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Marco teórico</w:t></w:r></w:p>',
+          '<w:p><w:pPr><w:pStyle w:val="Heading3"/></w:pPr><w:r><w:t>Antecedentes</w:t></w:r></w:p>',
+          '</w:document>',
+          '--ENTRY:word/styles.xml--',
+          '<w:styles><w:style w:styleId="Heading1"/><w:style w:styleId="Heading2"/><w:style w:styleId="Heading3"/></w:styles>',
+        ].join(''),
         'utf8',
       ),
     );
@@ -1078,7 +1087,16 @@ describe('thesis lifecycle registry routes', () => {
     const pdfPath = path.join(fixtureRoot, 'outline.pdf');
     fs.writeFileSync(
       pdfPath,
-      Buffer.from('%PDF-1.4\nINTRODUCCION\nMARCO TEORICO\nRESULTADOS\n%%EOF', 'utf8'),
+      Buffer.from([
+        '%PDF-1.4',
+        '/Title (Tesis Demo)',
+        '/Outlines',
+        'OUTLINE:1:Introducción',
+        'OUTLINE:2:Marco teórico',
+        'OUTLINE:3:Estado del arte',
+        'OUTLINE:2:Resultados',
+        '%%EOF',
+      ].join('\n'), 'utf8'),
     );
 
     const createResponse = await app.inject({
@@ -1154,6 +1172,7 @@ describe('thesis lifecycle registry routes', () => {
           detectedFormat: string;
           terminalStatus: string;
           warnings: string[];
+          structureSummary: { items: string[] } | null;
           normalizationSummary: { nodeCount: number; provenanceCoverage: { available: number; unavailable: number } } | null;
         };
       };
@@ -1166,7 +1185,7 @@ describe('thesis lifecycle registry routes', () => {
       terminalStatus: 'succeeded',
       structureSummary: {
         entrypoint: 'main.tex',
-        items: ['chapter1.tex', 'main.tex', 'sections/methodology.tex'],
+        items: ['main.tex', 'chapter1.tex', 'sections/methodology.tex'],
       },
       normalizationSummary: {
         nodeCount: 5,
@@ -1180,11 +1199,11 @@ describe('thesis lifecycle registry routes', () => {
       terminalStatus: 'succeeded',
       structureSummary: {
         entrypoint: 'word/document.xml',
-        items: ['word/document.xml', 'chapter:Introducción', 'section:Marco teórico'],
+        items: ['word/document.xml', 'chapter:Introducción', 'section:Marco teórico', 'subsection:Antecedentes'],
       },
       normalizationSummary: {
-        nodeCount: 3,
-        provenanceCoverage: { available: 3, unavailable: 0 },
+        nodeCount: 4,
+        provenanceCoverage: { available: 4, unavailable: 0 },
       },
     });
 
@@ -1192,9 +1211,18 @@ describe('thesis lifecycle registry routes', () => {
     expect(pdfJob.intakeJob.detection).toMatchObject({ format: 'pdf', matchedBy: 'extension:.pdf' });
     expect(pdfJob.intakeJob.report.detectedFormat).toBe('pdf');
     expect(pdfJob.intakeJob.report.terminalStatus).toBe('succeeded');
+    expect(pdfJob.intakeJob.report.structureSummary).toMatchObject({
+      items: [
+        'document:outline.pdf',
+        'chapter:Introducción',
+        'section:Marco teórico',
+        'subsection:Estado del arte',
+        'section:Resultados',
+      ],
+    });
     expect(pdfJob.intakeJob.report.normalizationSummary).toMatchObject({
-      nodeCount: 4,
-      provenanceCoverage: { available: 4, unavailable: 0 },
+      nodeCount: 5,
+      provenanceCoverage: { available: 5, unavailable: 0 },
     });
 
     const statusResponse = await app.inject({
@@ -1258,7 +1286,10 @@ describe('thesis lifecycle registry routes', () => {
   it('extracts degraded DOCX and PDF outlines with explicit provenance-unavailable warnings when semantics are weak', async () => {
     const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-degraded-'));
     const docxPath = path.join(fixtureRoot, 'degraded.docx');
-    fs.writeFileSync(docxPath, Buffer.from('PK\u0003\u0004word/document.xml<w:p><w:r><w:t>Solo texto plano</w:t></w:r></w:p>', 'utf8'));
+    fs.writeFileSync(
+      docxPath,
+      Buffer.from('PK\u0003\u0004--ENTRY:word/document.xml--<w:document><w:p><w:r><w:t>Solo texto plano</w:t></w:r></w:p></w:document>', 'utf8'),
+    );
 
     const pdfPath = path.join(fixtureRoot, 'degraded.pdf');
     fs.writeFileSync(pdfPath, Buffer.from('%PDF-1.4\ntexto sin encabezados claros\n%%EOF', 'utf8'));
