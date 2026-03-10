@@ -982,6 +982,69 @@ describe('thesis lifecycle registry routes', () => {
     });
   });
 
+  it('maps host-style workspace roots through HOST_REPO_ROOT when intake runs inside the manifest-started container', async () => {
+    const hostRepoRoot = '/root/thesislab';
+    const containerRepoRoot = path.resolve(process.cwd(), '..', '..');
+    const tempRoot = path.join(containerRepoRoot, 'tmp');
+    fs.mkdirSync(tempRoot, { recursive: true });
+    const fixtureRoot = fs.mkdtempSync(path.join(tempRoot, 'intake-host-root-'));
+    const latexDir = path.join(fixtureRoot, 'latex-project');
+    fs.mkdirSync(latexDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'main.tex'),
+      '\\documentclass{report}\n\\begin{document}\n\\chapter{Ruta host}\n\\section{Importación viva}\n\\end{document}\n',
+      'utf8',
+    );
+
+    const hostFixtureRoot = fixtureRoot.replace(containerRepoRoot, hostRepoRoot);
+    const hostLatexDir = latexDir.replace(containerRepoRoot, hostRepoRoot);
+    const previousHostRepoRoot = process.env.HOST_REPO_ROOT;
+    process.env.HOST_REPO_ROOT = hostRepoRoot;
+
+    try {
+      const createResponse = await app.inject({
+        method: 'POST',
+        url: '/theses',
+        payload: {
+          title: 'Tesis con raíz host',
+          degreeProgram: 'Máster en IA',
+          institution: 'Universidad Demo',
+          workspacePath: hostFixtureRoot,
+        },
+      });
+
+      expect(createResponse.statusCode).toBe(201);
+      const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+      const intakeResponse = await app.inject({
+        method: 'POST',
+        url: `/theses/${thesisId}/intake-jobs`,
+        payload: { importRootPath: hostLatexDir },
+      });
+
+      expect(intakeResponse.statusCode).toBe(201);
+      const intakePayload = intakeResponse.json() as {
+        intakeJob: {
+          status: string;
+          report: {
+            terminalStatus: string;
+            structureSummary: { entrypoint: string | null } | null;
+          } | null;
+        };
+      };
+
+      expect(intakePayload.intakeJob.status).toBe('succeeded');
+      expect(intakePayload.intakeJob.report?.terminalStatus).toBe('succeeded');
+      expect(intakePayload.intakeJob.report?.structureSummary?.entrypoint).toBe('main.tex');
+    } finally {
+      if (previousHostRepoRoot === undefined) {
+        delete process.env.HOST_REPO_ROOT;
+      } else {
+        process.env.HOST_REPO_ROOT = previousHostRepoRoot;
+      }
+    }
+  });
+
   it('creates deterministic terminal intake jobs and reports explicit format detection for latex, docx, and pdf', async () => {
     const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-fixtures-'));
     const latexDir = path.join(fixtureRoot, 'latex-project');
