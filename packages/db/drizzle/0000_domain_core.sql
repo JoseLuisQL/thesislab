@@ -44,7 +44,8 @@ CREATE TABLE `workflow_tasks` (
 	`active_checkpoint_id` text,
 	`created_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	`updated_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
-	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade
+	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`parent_task_id`) REFERENCES `workflow_tasks`(`id`) ON UPDATE no action ON DELETE set null
 );
 
 CREATE TABLE `workflow_task_checkpoints` (
@@ -149,7 +150,8 @@ CREATE TABLE `normalized_nodes` (
 	`created_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	`updated_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`intake_job_id`) REFERENCES `intake_jobs`(`id`) ON UPDATE no action ON DELETE set null
+	FOREIGN KEY (`intake_job_id`) REFERENCES `intake_jobs`(`id`) ON UPDATE no action ON DELETE set null,
+	FOREIGN KEY (`parent_node_id`) REFERENCES `normalized_nodes`(`id`) ON UPDATE no action ON DELETE set null
 );
 
 CREATE TABLE `sources` (
@@ -182,7 +184,9 @@ CREATE TABLE `evidence_fragments` (
 	`created_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	`updated_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`source_id`) REFERENCES `sources`(`id`) ON UPDATE no action ON DELETE cascade
+	FOREIGN KEY (`source_id`) REFERENCES `sources`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`normalized_node_id`) REFERENCES `normalized_nodes`(`id`) ON UPDATE no action ON DELETE set null,
+	FOREIGN KEY (`task_id`) REFERENCES `workflow_tasks`(`id`) ON UPDATE no action ON DELETE set null
 );
 
 CREATE TABLE `claims` (
@@ -194,7 +198,8 @@ CREATE TABLE `claims` (
 	`support_summary` text DEFAULT '' NOT NULL,
 	`created_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	`updated_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
-	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade
+	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`normalized_node_id`) REFERENCES `normalized_nodes`(`id`) ON UPDATE no action ON DELETE set null
 );
 
 CREATE TABLE `claim_evidence_links` (
@@ -225,7 +230,9 @@ CREATE TABLE `zotero_mappings` (
 	`last_synced_at` text,
 	`created_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	`updated_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
-	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade
+	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`normalized_node_id`) REFERENCES `normalized_nodes`(`id`) ON UPDATE no action ON DELETE set null,
+	FOREIGN KEY (`source_id`) REFERENCES `sources`(`id`) ON UPDATE no action ON DELETE set null
 );
 
 CREATE TABLE `policy_profiles` (
@@ -273,7 +280,8 @@ CREATE TABLE `compliance_issues` (
 	`updated_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`compliance_run_id`) REFERENCES `compliance_runs`(`id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`policy_profile_id`) REFERENCES `policy_profiles`(`id`) ON UPDATE no action ON DELETE restrict
+	FOREIGN KEY (`policy_profile_id`) REFERENCES `policy_profiles`(`id`) ON UPDATE no action ON DELETE restrict,
+	FOREIGN KEY (`normalized_node_id`) REFERENCES `normalized_nodes`(`id`) ON UPDATE no action ON DELETE set null
 );
 
 CREATE TABLE `academic_qa_runs` (
@@ -305,7 +313,9 @@ CREATE TABLE `academic_qa_issues` (
 	`created_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	`updated_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`academic_qa_run_id`) REFERENCES `academic_qa_runs`(`id`) ON UPDATE no action ON DELETE cascade
+	FOREIGN KEY (`academic_qa_run_id`) REFERENCES `academic_qa_runs`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`claim_id`) REFERENCES `claims`(`id`) ON UPDATE no action ON DELETE set null,
+	FOREIGN KEY (`normalized_node_id`) REFERENCES `normalized_nodes`(`id`) ON UPDATE no action ON DELETE set null
 );
 
 CREATE TABLE `build_runs` (
@@ -323,5 +333,5 @@ CREATE TABLE `build_runs` (
 	`created_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	`updated_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
 	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade,
-	FOREIGN KEY (`checkpoint_id`) REFERENCES `checkpoints`(`id`) ON UPDATE no action ON DELETE no action
+	FOREIGN KEY (`checkpoint_id`) REFERENCES `checkpoints`(`id`) ON UPDATE no action ON DELETE set null
 );
