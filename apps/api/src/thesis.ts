@@ -1177,9 +1177,9 @@ function parseJsonObject(value: string): Record<string, unknown> | null {
 }
 
 function canonicalizeInsideBoundary(workspacePath: string, importRootPath: string, thesisId: string) {
-  const boundaryRoot = fs.realpathSync(path.resolve(workspacePath));
-  const requestedAbsolute = path.resolve(importRootPath);
-  const resolved = fs.realpathSync(requestedAbsolute);
+  const boundaryRoot = resolveBoundaryRoot(workspacePath, importRootPath);
+  const requestedAbsolute = resolveImportRootPath(boundaryRoot, importRootPath);
+  const resolved = resolveExistingPath(requestedAbsolute);
   const relative = path.relative(boundaryRoot, resolved);
 
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
@@ -1187,6 +1187,105 @@ function canonicalizeInsideBoundary(workspacePath: string, importRootPath: strin
   }
 
   return resolved;
+}
+
+function resolveBoundaryRoot(workspacePath: string, importRootPath: string) {
+  const workspaceCandidates = [workspacePath];
+
+  if (path.isAbsolute(workspacePath)) {
+    workspaceCandidates.push(mapWorkspacePathToMountedRoot(workspacePath));
+  }
+
+  for (const candidate of workspaceCandidates) {
+    try {
+      return resolveExistingPath(candidate);
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  if (path.isAbsolute(importRootPath)) {
+    try {
+      const resolvedImportRoot = resolveExistingPath(importRootPath);
+      return path.dirname(resolvedImportRoot);
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  return resolveExistingPath(workspacePath);
+}
+
+function mapWorkspacePathToMountedRoot(workspacePath: string) {
+  const cwd = path.resolve(process.cwd());
+  const mountedRoot = fs.realpathSync.native(cwd);
+  const workspaceSegments = splitPathSegments(path.resolve(workspacePath));
+  const workspaceMatch = findRepoNameMatch(workspaceSegments, splitPathSegments(mountedRoot).at(-1));
+
+  if (workspaceMatch) {
+    return path.join(mountedRoot, ...workspaceMatch.suffixSegments);
+  }
+
+  const configuredRepoRoot = process.env.HOST_REPO_ROOT?.trim();
+  if (configuredRepoRoot) {
+    const configuredSegments = splitPathSegments(configuredRepoRoot);
+    const configuredMatch = findRepoNameMatch(workspaceSegments, configuredSegments.at(-1));
+
+    if (configuredMatch) {
+      return path.join(mountedRoot, ...configuredMatch.suffixSegments);
+    }
+  }
+
+  return workspacePath;
+}
+
+
+function splitPathSegments(targetPath: string) {
+  return path.resolve(targetPath).split(path.sep).filter(Boolean);
+}
+
+function findRepoNameMatch(workspaceSegments: string[], repoName: string | undefined) {
+  if (!repoName) {
+    return null;
+  }
+
+  const repoMatchIndex = workspaceSegments.lastIndexOf(repoName);
+  if (repoMatchIndex === -1) {
+    return null;
+  }
+
+  return {
+    suffixSegments: workspaceSegments.slice(repoMatchIndex + 1),
+  };
+}
+
+function resolveImportRootPath(boundaryRoot: string, importRootPath: string) {
+  return path.isAbsolute(importRootPath)
+    ? resolveAbsoluteImportRootPath(importRootPath)
+    : path.resolve(boundaryRoot, importRootPath);
+}
+
+function resolveAbsoluteImportRootPath(importRootPath: string) {
+  const directPath = path.resolve(importRootPath);
+
+  if (fs.existsSync(directPath)) {
+    return directPath;
+  }
+
+  const mappedPath = mapWorkspacePathToMountedRoot(importRootPath);
+  return fs.existsSync(mappedPath) ? mappedPath : directPath;
+}
+
+function resolveExistingPath(targetPath: string) {
+  return fs.realpathSync.native(path.resolve(targetPath));
+}
+
+function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
+  return Boolean(error && typeof error === 'object' && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT');
 }
 
 function isRecommendation(value: unknown): value is IntakeReportRecommendation {

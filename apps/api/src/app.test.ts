@@ -1234,6 +1234,53 @@ describe('thesis lifecycle registry routes', () => {
     expect((pdfNodes.json() as { nodes: Array<{ provenanceKind: string }> }).nodes.some((node) => node.provenanceKind === 'unavailable')).toBe(true);
   });
 
+  it('accepts workspace-local relative intake roots against a real workspace boundary path', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-relative-'));
+    const latexDir = path.join(fixtureRoot, 'imports', 'latex-project');
+    fs.mkdirSync(latexDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'main.tex'),
+      '\\documentclass{report}\\n\\begin{document}\\n\\section{Introducción}\\nTexto\\n\\end{document}\\n',
+      'utf8',
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis intake relativa',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: 'imports/latex-project' },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+    const payload = intakeResponse.json() as {
+      intakeJob: {
+        status: string;
+        importRootPath: string;
+        report: {
+          terminalStatus: string;
+          failures: Array<{ code: string }>;
+        } | null;
+      };
+    };
+
+    expect(payload.intakeJob.status).toBe('succeeded');
+    expect(payload.intakeJob.importRootPath).toBe(latexDir);
+    expect(payload.intakeJob.report?.terminalStatus).toBe('succeeded');
+    expect(payload.intakeJob.report?.failures).toEqual([]);
+  });
+
   it('blocks LaTeX intake that escapes the thesis workspace boundary through include roots or symlinks', async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-boundary-'));
     const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-external-'));
