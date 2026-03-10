@@ -38,6 +38,15 @@ type IntakeFormatDetection = {
   matchedBy: string;
 };
 
+type IntakeReportReplacement = {
+  isReimport?: boolean;
+  replacesIntakeJobId?: string;
+  recoverableCheckpointId?: string;
+  supersedesWorkspace?: boolean;
+  replacedByIntakeJobId?: string;
+  replacedByRecoverableCheckpointId?: string;
+};
+
 type IntakeReportSummary = {
   thesisId: string;
   intakeJobId: string;
@@ -59,12 +68,7 @@ type IntakeReportSummary = {
       unavailable: number;
     };
   } | null;
-  replacement: {
-    isReimport: boolean;
-    replacesIntakeJobId: string;
-    recoverableCheckpointId: string;
-    supersedesWorkspace: boolean;
-  } | null;
+  replacement: IntakeReportReplacement | null;
   warnings: string[];
   failures: IntakeFailureDiagnostic[];
   recommendedNextSteps: IntakeReportRecommendation[];
@@ -751,6 +755,49 @@ export class ThesisLifecycleService {
           updatedAt: completedAt,
         })
         .where(eq(intakeJobs.id, intakeJobId));
+
+      if (outcome.status === 'succeeded' && priorActiveImportId && recoverableCheckpointId) {
+        const priorActiveJob = await tx.query.intakeJobs.findFirst({
+          where: (fields, operators) => operators.eq(fields.id, priorActiveImportId),
+        });
+
+        if (priorActiveJob) {
+          const priorReport = parseIntakeReport(priorActiveJob.reportJson);
+          const nextReplacement: IntakeReportReplacement = {
+            ...(priorReport?.replacement ?? {}),
+            replacedByIntakeJobId: intakeJobId,
+            replacedByRecoverableCheckpointId: recoverableCheckpointId,
+          };
+
+          await tx
+            .update(intakeJobs)
+            .set({
+              reportJson: JSON.stringify({
+                ...(priorReport ?? {
+                  thesisId,
+                  intakeJobId: priorActiveJob.id,
+                  terminalStatus: normalizeIntakeStatus(priorActiveJob.status),
+                  detectedFormat: normalizeSourceFormat(priorActiveJob.sourceFormat),
+                  detection: parseIntakeReport(priorActiveJob.reportJson)?.detection ?? {
+                    format: normalizeSourceFormat(priorActiveJob.sourceFormat),
+                    reason: 'Detection payload unavailable.',
+                    matchedBy: 'persisted_status',
+                  },
+                  extractionStatus: 'not_started',
+                  normalizationStatus: 'not_started',
+                  structureSummary: null,
+                  normalizationSummary: null,
+                  warnings: parseStringArray(priorActiveJob.warningsJson),
+                  failures: [],
+                  recommendedNextSteps: parseRecommendations(priorActiveJob.recommendationsJson),
+                }),
+                replacement: nextReplacement,
+              } satisfies IntakeReportSummary),
+              updatedAt: completedAt,
+            })
+            .where(eq(intakeJobs.id, priorActiveImportId));
+        }
+      }
 
       if (outcome.status === 'succeeded') {
         await tx

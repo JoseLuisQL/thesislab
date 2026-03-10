@@ -894,7 +894,7 @@ describe('thesis lifecycle registry routes', () => {
     });
   });
 
-  it('makes re-import replacement semantics explicit and recoverable instead of silently overwriting the active workspace', async () => {
+  it('keeps repeated re-imports recoverable and exposes forward/backward lineage on active and superseded imports', async () => {
     const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-reimport-'));
     const latexDir = path.join(fixtureRoot, 'latex-project');
     fs.mkdirSync(latexDir, { recursive: true });
@@ -974,34 +974,125 @@ describe('thesis lifecycle registry routes', () => {
       recoverableCheckpointId: expect.any(String),
       supersedesWorkspace: true,
     });
-    expect(secondImportPayload.intakeJob.report?.warnings.some((warning) => /re-importaci[oó]n|reimport/i.test(warning))).toBe(true);
-    expect(secondImportPayload.intakeJob.report?.recommendedNextSteps).toContainEqual(
+
+    fs.writeFileSync(
+      mainTex,
+      '\\documentclass{report}\n\\begin{document}\n\\chapter{Version Tres}\n\\section{Marco actualizado v3}\n\\subsection{Hallazgos nuevos}\n\\subsection{Continuidad explícita}\n\\end{document}\n',
+      'utf8',
+    );
+
+    const thirdImport = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+
+    if (thirdImport.statusCode !== 201) {
+      throw new Error(`Third import failed: ${thirdImport.statusCode} ${thirdImport.body}`);
+    }
+
+    const thirdImportPayload = thirdImport.json() as {
+      intakeJob: {
+        id: string;
+        status: string;
+        report: {
+          warnings: string[];
+          recommendedNextSteps: Array<{ code: string; triggeredBy: string[]; message: string }>;
+          replacement: {
+            isReimport: boolean;
+            replacesIntakeJobId: string;
+            recoverableCheckpointId: string;
+            supersedesWorkspace: boolean;
+          } | null;
+          normalizationSummary: { rootNodeIds: string[]; nodeCount: number } | null;
+        } | null;
+      };
+    };
+
+    expect(thirdImportPayload.intakeJob.status).toBe('succeeded');
+    expect(thirdImportPayload.intakeJob.report?.replacement).toEqual({
+      isReimport: true,
+      replacesIntakeJobId: secondImportPayload.intakeJob.id,
+      recoverableCheckpointId: expect.any(String),
+      supersedesWorkspace: true,
+    });
+    expect(thirdImportPayload.intakeJob.report?.warnings.some((warning) => /re-importaci[oó]n|reimport/i.test(warning))).toBe(true);
+    expect(thirdImportPayload.intakeJob.report?.recommendedNextSteps).toContainEqual(
       expect.objectContaining({
         code: 'REVIEW_REIMPORT_REPLACEMENT',
-        triggeredBy: expect.arrayContaining([`reimport:replaces:${firstImportPayload.intakeJob.id}`]),
+        triggeredBy: expect.arrayContaining([`reimport:replaces:${secondImportPayload.intakeJob.id}`]),
       }),
     );
 
-    const newNodesResponse = await app.inject({
+    const supersededFirstResponse = await app.inject({
       method: 'GET',
-      url: `/theses/${thesisId}/intake-jobs/${secondImportPayload.intakeJob.id}/nodes`,
+      url: `/theses/${thesisId}/intake-jobs/${firstImportPayload.intakeJob.id}`,
+    });
+    const supersededSecondResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/intake-jobs/${secondImportPayload.intakeJob.id}`,
+    });
+    const thirdNodesResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/intake-jobs/${thirdImportPayload.intakeJob.id}/nodes`,
     });
     const checkpointsResponse = await app.inject({
       method: 'GET',
       url: `/theses/${thesisId}/checkpoints`,
+    });
+    const detailResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}`,
     });
     const resumeResponse = await app.inject({
       method: 'GET',
       url: `/theses/${thesisId}/resume`,
     });
 
-    expect(newNodesResponse.statusCode).toBe(200);
+    expect(supersededFirstResponse.statusCode).toBe(200);
+    expect(supersededSecondResponse.statusCode).toBe(200);
+    expect(thirdNodesResponse.statusCode).toBe(200);
     expect(checkpointsResponse.statusCode).toBe(200);
+    expect(detailResponse.statusCode).toBe(200);
     expect(resumeResponse.statusCode).toBe(200);
 
-    const newNodes = newNodesResponse.json() as { nodes: Array<{ id: string }> };
+    const supersededFirstPayload = supersededFirstResponse.json() as {
+      intakeJob: {
+        id: string;
+        report: {
+          replacement: { replacedByIntakeJobId: string | null; replacedByRecoverableCheckpointId: string | null } | null;
+        } | null;
+      };
+    };
+    const supersededSecondPayload = supersededSecondResponse.json() as {
+      intakeJob: {
+        id: string;
+        report: {
+          replacement: {
+            isReimport: boolean;
+            replacesIntakeJobId: string;
+            replacedByIntakeJobId: string | null;
+            recoverableCheckpointId: string | null;
+            replacedByRecoverableCheckpointId: string | null;
+          } | null;
+        } | null;
+      };
+    };
+    const thirdNodes = thirdNodesResponse.json() as { nodes: Array<{ id: string }> };
     const checkpointsPayload = checkpointsResponse.json() as {
       checkpoints: Array<{ id: string; reason: string; note: string | null; scope: string }>;
+    };
+    const detailPayload = detailResponse.json() as {
+      thesis: {
+        thesis: { activeImportId: string | null; currentState: string };
+        activeWorkspace: {
+          intakeJobId: string;
+          replacementOfIntakeJobId: string | null;
+          replacedByIntakeJobId: string | null;
+          nodeCount: number;
+          recoverableCheckpointId: string | null;
+        } | null;
+      };
     };
     const resumePayload = resumeResponse.json() as {
       resume: {
@@ -1012,11 +1103,24 @@ describe('thesis lifecycle registry routes', () => {
           replacementOfIntakeJobId: string | null;
           replacedByIntakeJobId: string | null;
           nodeCount: number;
+          recoverableCheckpointId: string | null;
         } | null;
       };
     };
 
-    expect(newNodes.nodes.length).toBeGreaterThan(0);
+    expect(thirdNodes.nodes.length).toBeGreaterThan(0);
+    expect(supersededFirstPayload.intakeJob.report?.replacement).toEqual({
+      replacedByIntakeJobId: secondImportPayload.intakeJob.id,
+      replacedByRecoverableCheckpointId: secondImportPayload.intakeJob.report?.replacement?.recoverableCheckpointId ?? null,
+    });
+    expect(supersededSecondPayload.intakeJob.report?.replacement).toEqual({
+      isReimport: true,
+      replacesIntakeJobId: firstImportPayload.intakeJob.id,
+      recoverableCheckpointId: secondImportPayload.intakeJob.report?.replacement?.recoverableCheckpointId ?? null,
+      supersedesWorkspace: true,
+      replacedByIntakeJobId: thirdImportPayload.intakeJob.id,
+      replacedByRecoverableCheckpointId: thirdImportPayload.intakeJob.report?.replacement?.recoverableCheckpointId ?? null,
+    });
     expect(checkpointsPayload.checkpoints).toContainEqual(
       expect.objectContaining({
         id: secondImportPayload.intakeJob.report?.replacement?.recoverableCheckpointId,
@@ -1025,17 +1129,35 @@ describe('thesis lifecycle registry routes', () => {
         note: expect.stringContaining(firstImportPayload.intakeJob.id),
       }),
     );
-    expect(resumePayload.resume.thesis.activeImportId).toBe(secondImportPayload.intakeJob.id);
+    expect(checkpointsPayload.checkpoints).toContainEqual(
+      expect.objectContaining({
+        id: thirdImportPayload.intakeJob.report?.replacement?.recoverableCheckpointId,
+        reason: 'before-reimport-replacement',
+        scope: 'intake-workspace',
+        note: expect.stringContaining(secondImportPayload.intakeJob.id),
+      }),
+    );
+    expect(detailPayload.thesis.thesis.activeImportId).toBe(thirdImportPayload.intakeJob.id);
+    expect(detailPayload.thesis.thesis.currentState).toBe('active');
+    expect(detailPayload.thesis.activeWorkspace).toMatchObject({
+      intakeJobId: thirdImportPayload.intakeJob.id,
+      replacementOfIntakeJobId: secondImportPayload.intakeJob.id,
+      replacedByIntakeJobId: null,
+      recoverableCheckpointId: thirdImportPayload.intakeJob.report?.replacement?.recoverableCheckpointId,
+      nodeCount: thirdImportPayload.intakeJob.report?.normalizationSummary?.nodeCount,
+    });
+    expect(resumePayload.resume.thesis.activeImportId).toBe(thirdImportPayload.intakeJob.id);
     expect(resumePayload.resume.thesis.currentState).toBe('active');
     expect(resumePayload.resume.latestCheckpoint).toMatchObject({
-      id: secondImportPayload.intakeJob.report?.replacement?.recoverableCheckpointId,
+      id: thirdImportPayload.intakeJob.report?.replacement?.recoverableCheckpointId,
       reason: 'before-reimport-replacement',
     });
     expect(resumePayload.resume.activeWorkspace).toMatchObject({
-      intakeJobId: secondImportPayload.intakeJob.id,
-      replacementOfIntakeJobId: firstImportPayload.intakeJob.id,
+      intakeJobId: thirdImportPayload.intakeJob.id,
+      replacementOfIntakeJobId: secondImportPayload.intakeJob.id,
       replacedByIntakeJobId: null,
-      nodeCount: secondImportPayload.intakeJob.report?.normalizationSummary?.nodeCount,
+      recoverableCheckpointId: thirdImportPayload.intakeJob.report?.replacement?.recoverableCheckpointId,
+      nodeCount: thirdImportPayload.intakeJob.report?.normalizationSummary?.nodeCount,
     });
   });
 
