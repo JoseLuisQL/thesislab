@@ -10,6 +10,8 @@ import { buildLocalFirstStatusPayload } from './status.js';
 import {
   type CreateCheckpointInput,
   type CreateFeedbackInput,
+  type CreateIntakeJobInput,
+  IntakeJobNotFoundError,
   ThesisNotFoundError,
   createThesisLifecycleService,
   type TransitionThesisInput,
@@ -53,6 +55,10 @@ const createFeedbackSchema = z.object({
   recordedAt: z.string().datetime().optional(),
 });
 
+const createIntakeJobSchema = z.object({
+  importRootPath: z.string().trim().min(1),
+});
+
 export function createApp() {
   const testDatabaseUrl = process.env.VITEST
     ? `file:${path.join(os.tmpdir(), `thesis-api-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.sqlite`)}`
@@ -82,6 +88,14 @@ export function createApp() {
       return reply.status(404).send({
         ok: false,
         code: 'THESIS_NOT_FOUND',
+        message: error.message,
+      });
+    }
+
+    if (error instanceof IntakeJobNotFoundError) {
+      return reply.status(404).send({
+        ok: false,
+        code: 'INTAKE_JOB_NOT_FOUND',
         message: error.message,
       });
     }
@@ -195,6 +209,33 @@ export function createApp() {
     );
 
     return { ok: true, resume };
+  });
+
+  app.post('/theses/:thesisId/intake-jobs', async (request, reply) => {
+    const payload = createIntakeJobSchema.parse(request.body) as CreateIntakeJobInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const intakeJob = await (await getThesisLifecycle()).service.createIntakeJob(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, intakeJob });
+  });
+
+  app.get('/theses/:thesisId/intake-jobs/:intakeJobId', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; intakeJobId: string };
+    const intakeJob = await (await getThesisLifecycle()).service.getIntakeJob(params.thesisId, params.intakeJobId);
+
+    return { ok: true, intakeJob };
+  });
+
+  app.get('/theses/:thesisId/intake-jobs/:intakeJobId/report', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; intakeJobId: string };
+    const report = await (await getThesisLifecycle()).service.getIntakeReport(params.thesisId, params.intakeJobId);
+
+    return { ok: true, report };
   });
 
   return app;

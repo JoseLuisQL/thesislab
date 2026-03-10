@@ -121,6 +121,42 @@ export type FeedbackEntryRecord = TimestampFields & {
 export type IntakeStatus = 'queued' | 'running' | 'succeeded' | 'partial' | 'failed';
 export type SourceFormat = 'latex' | 'docx' | 'pdf' | 'unknown';
 
+export type IntakeReportRecommendation = {
+  code: string;
+  message: string;
+  triggeredBy: string[];
+};
+
+export type IntakeFailureDiagnostic = {
+  code: string;
+  message: string;
+  detail?: string;
+};
+
+export type IntakeFormatDetection = {
+  format: SourceFormat;
+  reason: string;
+  matchedBy: string;
+};
+
+export type IntakeReportSummary = {
+  thesisId: EntityId;
+  intakeJobId: EntityId;
+  terminalStatus: IntakeStatus;
+  detectedFormat: SourceFormat;
+  detection: IntakeFormatDetection;
+  extractionStatus: 'not_started' | 'completed' | 'failed';
+  normalizationStatus: 'not_started' | 'completed' | 'failed';
+  structureSummary: {
+    entrypoint: string | null;
+    itemCount: number;
+    items: string[];
+  } | null;
+  warnings: string[];
+  failures: IntakeFailureDiagnostic[];
+  recommendedNextSteps: IntakeReportRecommendation[];
+};
+
 export type IntakeJobRecord = TimestampFields & {
   id: EntityId;
   thesisId: EntityId;
@@ -308,7 +344,9 @@ export interface PersistenceHelpers {
   now(): string;
 }
 
-export interface ThesisRepository extends Repository<ThesisRecord> {}
+export interface ThesisRepository extends Repository<ThesisRecord> {
+  findBySlug(slug: string): Promise<Pick<ThesisRecord, 'id'> | null>;
+}
 export interface ThesisStateRepository extends Repository<ThesisStateRecord> {}
 export interface WorkflowTaskRepository extends Repository<WorkflowTaskRecord> {}
 export interface WorkflowTaskCheckpointRepository

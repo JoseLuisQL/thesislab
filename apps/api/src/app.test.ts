@@ -1,3 +1,7 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createApp } from './app.js';
@@ -691,6 +695,242 @@ describe('thesis lifecycle registry routes', () => {
         ok: false,
         code: 'THESIS_NOT_FOUND',
         message: 'Thesis does-not-exist was not found.',
+      });
+    }
+  });
+
+  it('creates deterministic terminal intake jobs and reports explicit format detection for latex, docx, and pdf', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-fixtures-'));
+    const latexDir = path.join(fixtureRoot, 'latex-project');
+    fs.mkdirSync(latexDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'main.tex'),
+      '\\documentclass{report}\n\\begin{document}\n\\chapter{Introduccion}\nHola.\n\\end{document}\n',
+      'utf8',
+    );
+
+    const docxPath = path.join(fixtureRoot, 'outline.docx');
+    fs.writeFileSync(docxPath, Buffer.from('PK\u0003\u0004word/document.xml', 'utf8'));
+
+    const pdfPath = path.join(fixtureRoot, 'outline.pdf');
+    fs.writeFileSync(pdfPath, Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF', 'utf8'));
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis intake exitosa',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const latexResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+    const docxResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: docxPath },
+    });
+    const pdfResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: pdfPath },
+    });
+
+    for (const response of [latexResponse, docxResponse, pdfResponse]) {
+      expect(response.statusCode).toBe(201);
+      const payload = response.json() as { intakeJob: { id: string; status: string; report: { terminalStatus: string } | null } };
+      expect(payload.intakeJob.id).toEqual(expect.any(String));
+      expect(payload.intakeJob.status).toBe('succeeded');
+      expect(payload.intakeJob.report?.terminalStatus).toBe('succeeded');
+    }
+
+    const latexJob = latexResponse.json() as {
+      intakeJob: {
+        id: string;
+        sourceFormat: string;
+        detection: { format: string; matchedBy: string };
+        report: { detectedFormat: string; terminalStatus: string; structureSummary: { entrypoint: string | null; items: string[] } | null };
+      };
+    };
+    const docxJob = docxResponse.json() as {
+      intakeJob: {
+        id: string;
+        sourceFormat: string;
+        detection: { format: string; matchedBy: string };
+        report: { detectedFormat: string; terminalStatus: string; structureSummary: { entrypoint: string | null } | null };
+      };
+    };
+    const pdfJob = pdfResponse.json() as {
+      intakeJob: {
+        id: string;
+        sourceFormat: string;
+        detection: { format: string; matchedBy: string };
+        report: { detectedFormat: string; terminalStatus: string; warnings: string[] };
+      };
+    };
+
+    expect(latexJob.intakeJob.sourceFormat).toBe('latex');
+    expect(latexJob.intakeJob.detection).toMatchObject({ format: 'latex', matchedBy: 'directory' });
+    expect(latexJob.intakeJob.report).toMatchObject({
+      detectedFormat: 'latex',
+      terminalStatus: 'succeeded',
+      structureSummary: {
+        entrypoint: 'main.tex',
+        items: ['main.tex'],
+      },
+    });
+
+    expect(docxJob.intakeJob.sourceFormat).toBe('docx');
+    expect(docxJob.intakeJob.detection).toMatchObject({ format: 'docx', matchedBy: 'extension:.docx' });
+    expect(docxJob.intakeJob.report).toMatchObject({
+      detectedFormat: 'docx',
+      terminalStatus: 'succeeded',
+      structureSummary: {
+        entrypoint: 'word/document.xml',
+      },
+    });
+
+    expect(pdfJob.intakeJob.sourceFormat).toBe('pdf');
+    expect(pdfJob.intakeJob.detection).toMatchObject({ format: 'pdf', matchedBy: 'extension:.pdf' });
+    expect(pdfJob.intakeJob.report.detectedFormat).toBe('pdf');
+    expect(pdfJob.intakeJob.report.terminalStatus).toBe('succeeded');
+    expect(pdfJob.intakeJob.report.warnings).toContain(
+      'PDF outline extraction is currently limited to container validation in this milestone.',
+    );
+
+    const statusResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/intake-jobs/${latexJob.intakeJob.id}`,
+    });
+    const reportResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/intake-jobs/${latexJob.intakeJob.id}/report`,
+    });
+
+    expect(statusResponse.statusCode).toBe(200);
+    expect(reportResponse.statusCode).toBe(200);
+    expect((statusResponse.json() as { intakeJob: { status: string } }).intakeJob.status).toBe('succeeded');
+    expect((reportResponse.json() as { report: { terminalStatus: string } }).report.terminalStatus).toBe('succeeded');
+  });
+
+  it('fails unsupported or corrupt imports explicitly without persisting a fake successful model', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-invalid-'));
+    const corruptLatexDir = path.join(fixtureRoot, 'latex-corrupt');
+    fs.mkdirSync(corruptLatexDir, { recursive: true });
+    fs.writeFileSync(path.join(corruptLatexDir, 'notes.txt'), 'sin tex', 'utf8');
+
+    const corruptDocxPath = path.join(fixtureRoot, 'broken.docx');
+    fs.writeFileSync(corruptDocxPath, Buffer.from('not-a-zip-docx', 'utf8'));
+
+    const corruptPdfPath = path.join(fixtureRoot, 'broken.pdf');
+    fs.writeFileSync(corruptPdfPath, Buffer.from('not-a-pdf', 'utf8'));
+
+    const unsupportedPath = path.join(fixtureRoot, 'unknown.bin');
+    fs.writeFileSync(unsupportedPath, Buffer.from([0, 1, 2, 3]));
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis intake fallida',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const failingResponses = await Promise.all([
+      app.inject({ method: 'POST', url: `/theses/${thesisId}/intake-jobs`, payload: { importRootPath: corruptLatexDir } }),
+      app.inject({ method: 'POST', url: `/theses/${thesisId}/intake-jobs`, payload: { importRootPath: corruptDocxPath } }),
+      app.inject({ method: 'POST', url: `/theses/${thesisId}/intake-jobs`, payload: { importRootPath: corruptPdfPath } }),
+      app.inject({ method: 'POST', url: `/theses/${thesisId}/intake-jobs`, payload: { importRootPath: unsupportedPath } }),
+    ]);
+
+    for (const response of failingResponses) {
+      expect(response.statusCode).toBe(201);
+      const payload = response.json() as {
+        intakeJob: {
+          status: string;
+          sourceFormat: string;
+          report: {
+            terminalStatus: string;
+            failures: Array<{ code: string }>;
+            normalizationStatus: string;
+          };
+        };
+      };
+
+      expect(payload.intakeJob.status).toBe('failed');
+      expect(payload.intakeJob.report.terminalStatus).toBe('failed');
+      expect(payload.intakeJob.report.normalizationStatus).toBe('failed');
+      expect(payload.intakeJob.report.failures.length).toBeGreaterThan(0);
+    }
+
+    const [latexFailure, docxFailure, pdfFailure, unsupportedFailure] = failingResponses.map((response) =>
+      response.json() as {
+        intakeJob: {
+          sourceFormat: string;
+          report: { failures: Array<{ code: string }>; structureSummary: unknown; recommendedNextSteps: Array<{ code: string }> };
+        };
+      },
+    );
+
+    expect(latexFailure.intakeJob.sourceFormat).toBe('latex');
+    expect(latexFailure.intakeJob.report.failures).toContainEqual(
+      expect.objectContaining({ code: 'LATEX_ENTRYPOINT_NOT_FOUND' }),
+    );
+    expect(docxFailure.intakeJob.sourceFormat).toBe('docx');
+    expect(docxFailure.intakeJob.report.failures).toContainEqual(
+      expect.objectContaining({ code: 'DOCX_ARCHIVE_CORRUPT' }),
+    );
+    expect(pdfFailure.intakeJob.sourceFormat).toBe('pdf');
+    expect(pdfFailure.intakeJob.report.failures).toContainEqual(
+      expect.objectContaining({ code: 'PDF_HEADER_INVALID' }),
+    );
+    expect(unsupportedFailure.intakeJob.sourceFormat).toBe('unknown');
+    expect(unsupportedFailure.intakeJob.report.failures).toContainEqual(
+      expect.objectContaining({ code: 'UNSUPPORTED_IMPORT_FORMAT' }),
+    );
+    expect(unsupportedFailure.intakeJob.report.structureSummary).toBeNull();
+    expect(unsupportedFailure.intakeJob.report.recommendedNextSteps).toContainEqual(
+      expect.objectContaining({ code: 'FIX_IMPORT_SOURCE' }),
+    );
+  });
+
+  it('fails safely when an intake job lookup uses an unknown job id', async () => {
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis sin intake',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/no-intake',
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    for (const url of [
+      `/theses/${thesisId}/intake-jobs/does-not-exist`,
+      `/theses/${thesisId}/intake-jobs/does-not-exist/report`,
+    ]) {
+      const response = await app.inject({ method: 'GET', url });
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({
+        ok: false,
+        code: 'INTAKE_JOB_NOT_FOUND',
+        message: `Intake job does-not-exist was not found for thesis ${thesisId}.`,
       });
     }
   });
