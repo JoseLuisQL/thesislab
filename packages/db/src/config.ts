@@ -1,9 +1,10 @@
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const DEFAULT_DATABASE_RELATIVE_PATH = path.join('data', 'thesis-research-os.sqlite');
 
 export function getWorkspaceRoot() {
-  return path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../..');
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 }
 
 export function getDatabaseFilePath(databaseUrl = process.env.DATABASE_URL) {
@@ -15,6 +16,11 @@ export function getDatabaseFilePath(databaseUrl = process.env.DATABASE_URL) {
 
   if (databaseUrl.startsWith('file:')) {
     const filePath = databaseUrl.slice('file:'.length);
+
+    if (path.isAbsolute(filePath)) {
+      return filePath;
+    }
+
     return path.resolve(workspaceRoot, filePath);
   }
 
@@ -22,5 +28,5 @@ export function getDatabaseFilePath(databaseUrl = process.env.DATABASE_URL) {
 }
 
 export function getMigrationsDirectory() {
-  return path.resolve(path.dirname(new URL(import.meta.url).pathname), '../drizzle');
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../drizzle');
 }

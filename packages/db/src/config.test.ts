@@ -17,6 +17,10 @@ describe('database config helpers', () => {
     );
   });
 
+  it('preserves absolute file: DATABASE_URL values for temp and persistent sqlite files', () => {
+    expect(getDatabaseFilePath('file:/tmp/test.sqlite')).toBe('/tmp/test.sqlite');
+  });
+
   it('exposes the package-local drizzle migrations folder', () => {
     expect(getMigrationsDirectory()).toBe(
       path.resolve(getWorkspaceRoot(), 'packages/db/drizzle'),
