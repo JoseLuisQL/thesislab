@@ -1286,6 +1286,24 @@ async function performIntakeInspection(
     failures.push(...latexOutcome.failures);
     normalizedNodes.push(...latexOutcome.normalizedNodes.map((node, index) => ({
       ...node,
+      id: stableNodeId(
+        detection.format,
+        node.sourcePath ?? 'unknown-source',
+        node.nodeType,
+        findNodeAnchorByRecord(node),
+        node.title ?? node.nodeType,
+        intakeJobId,
+      ),
+      parentNodeId: node.parentNodeId
+        ? stableNodeId(
+            detection.format,
+            findNodeSourcePath(latexOutcome.normalizedNodes, node.parentNodeId) ?? 'unknown-source',
+            findNodeType(latexOutcome.normalizedNodes, node.parentNodeId) ?? 'document',
+            findNodeAnchor(latexOutcome.normalizedNodes, node.parentNodeId),
+            findNodeTitle(latexOutcome.normalizedNodes, node.parentNodeId) ?? findNodeType(latexOutcome.normalizedNodes, node.parentNodeId) ?? 'document',
+            intakeJobId,
+          )
+        : null,
       thesisId,
       intakeJobId,
       ordinal: index + 1,
@@ -1304,6 +1322,24 @@ async function performIntakeInspection(
     failures.push(...docxOutcome.failures);
     normalizedNodes.push(...docxOutcome.normalizedNodes.map((node, index) => ({
       ...node,
+      id: stableNodeId(
+        detection.format,
+        node.sourcePath ?? 'unknown-source',
+        node.nodeType,
+        findNodeAnchorByRecord(node),
+        node.title ?? node.nodeType,
+        intakeJobId,
+      ),
+      parentNodeId: node.parentNodeId
+        ? stableNodeId(
+            detection.format,
+            findNodeSourcePath(docxOutcome.normalizedNodes, node.parentNodeId) ?? 'unknown-source',
+            findNodeType(docxOutcome.normalizedNodes, node.parentNodeId) ?? 'document',
+            findNodeAnchor(docxOutcome.normalizedNodes, node.parentNodeId),
+            findNodeTitle(docxOutcome.normalizedNodes, node.parentNodeId) ?? findNodeType(docxOutcome.normalizedNodes, node.parentNodeId) ?? 'document',
+            intakeJobId,
+          )
+        : null,
       thesisId,
       intakeJobId,
       ordinal: index + 1,
@@ -1322,6 +1358,24 @@ async function performIntakeInspection(
     failures.push(...pdfOutcome.failures);
     normalizedNodes.push(...pdfOutcome.normalizedNodes.map((node, index) => ({
       ...node,
+      id: stableNodeId(
+        detection.format,
+        node.sourcePath ?? 'unknown-source',
+        node.nodeType,
+        findNodeAnchorByRecord(node),
+        node.title ?? node.nodeType,
+        intakeJobId,
+      ),
+      parentNodeId: node.parentNodeId
+        ? stableNodeId(
+            detection.format,
+            findNodeSourcePath(pdfOutcome.normalizedNodes, node.parentNodeId) ?? 'unknown-source',
+            findNodeType(pdfOutcome.normalizedNodes, node.parentNodeId) ?? 'document',
+            findNodeAnchor(pdfOutcome.normalizedNodes, node.parentNodeId),
+            findNodeTitle(pdfOutcome.normalizedNodes, node.parentNodeId) ?? findNodeType(pdfOutcome.normalizedNodes, node.parentNodeId) ?? 'document',
+            intakeJobId,
+          )
+        : null,
       thesisId,
       intakeJobId,
       ordinal: index + 1,
@@ -1606,6 +1660,42 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
   return { nodes, warnings, failures, orderedFiles };
 }
 
+function findNodeById(nodes: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>>, nodeId: string) {
+  return nodes.find((candidate) => candidate.id === nodeId) ?? null;
+}
+
+function findNodeSourcePath(nodes: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>>, nodeId: string) {
+  return findNodeById(nodes, nodeId)?.sourcePath ?? null;
+}
+
+function findNodeType(nodes: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>>, nodeId: string) {
+  return findNodeById(nodes, nodeId)?.nodeType ?? null;
+}
+
+function findNodeTitle(nodes: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>>, nodeId: string) {
+  return findNodeById(nodes, nodeId)?.title ?? null;
+}
+
+function findNodeAnchor(nodes: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>>, nodeId: string) {
+  const sourceStart = findNodeById(nodes, nodeId)?.sourceStart ?? null;
+  if (!sourceStart) {
+    return 0;
+  }
+
+  const match = sourceStart.match(/(\d+)/);
+  return match ? Number(match[1]) : 0;
+}
+
+function findNodeAnchorByRecord(node: Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>) {
+  const sourceStart = node.sourceStart ?? null;
+  if (!sourceStart) {
+    return 0;
+  }
+
+  const match = sourceStart.match(/(\d+)/);
+  return match ? Number(match[1]) : 0;
+}
+
 function extractDocxOutline(xml: string, fileName: string) {
   const warnings: string[] = [];
   const nodes: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>> = [];
@@ -1731,8 +1821,13 @@ function extractPdfOutline(text: string, fileName: string) {
   return { warnings, nodes };
 }
 
-function stableNodeId(format: string, sourcePath: string, nodeType: string, anchor: number, title: string) {
-  return `${format}:${sourcePath}:${nodeType}:${anchor}:${slugify(title).slice(0, 48)}`;
+function stableNodeId(format: string, sourcePath: string, nodeType: string, anchor: number, title: string, namespace?: string) {
+  const parts = [format, sourcePath, nodeType, String(anchor), slugify(title).slice(0, 48)];
+  if (namespace) {
+    parts.push(namespace);
+  }
+
+  return parts.join(':');
 }
 
 function ensureUniqueNodeId(baseId: string, existingIds: Set<string>) {

@@ -837,7 +837,7 @@ describe('thesis lifecycle registry routes', () => {
     });
   });
 
-  it.skip('makes re-import replacement semantics explicit and recoverable instead of silently overwriting the active workspace', async () => {
+  it('makes re-import replacement semantics explicit and recoverable instead of silently overwriting the active workspace', async () => {
     const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-reimport-'));
     const latexDir = path.join(fixtureRoot, 'latex-project');
     fs.mkdirSync(latexDir, { recursive: true });
@@ -1167,17 +1167,17 @@ describe('thesis lifecycle registry routes', () => {
     };
 
     expect(nodesPayload.nodes.map((node) => node.id)).toEqual([
-      'latex:main.tex:document:0:document',
-      'latex:chapter1.tex:chapter:1:introduccion',
-      'latex:chapter1.tex:section:2:marco-teorico',
-      'latex:sections/methodology.tex:section:1:metodologia',
-      'latex:sections/methodology.tex:subsection:2:datos',
+      expect.stringMatching(/^latex:main\.tex:document:1:main-tex:[0-9a-f-]+$/),
+      expect.stringMatching(/^latex:chapter1\.tex:chapter:1:introduccion:[0-9a-f-]+$/),
+      expect.stringMatching(/^latex:chapter1\.tex:section:2:marco-teorico:[0-9a-f-]+$/),
+      expect.stringMatching(/^latex:sections\/methodology\.tex:section:1:metodologia:[0-9a-f-]+$/),
+      expect.stringMatching(/^latex:sections\/methodology\.tex:subsection:2:datos:[0-9a-f-]+$/),
     ]);
     expect(nodesPayload.nodes.map((node) => node.ordinal)).toEqual([1, 2, 3, 4, 5]);
     expect(nodesPayload.nodes[1]).toMatchObject({
       nodeType: 'chapter',
       title: 'Introduccion',
-      parentNodeId: 'latex:main.tex:document:0:document',
+      parentNodeId: nodesPayload.nodes[0]?.id ?? null,
       provenanceKind: 'latex',
       provenance: { kind: 'latex', filePath: 'chapter1.tex', lineStart: 1, lineEnd: 1 },
     });
