@@ -8,9 +8,11 @@ import {
   uniqueIndex,
 } from 'drizzle-orm/sqlite-core';
 
+const sqliteIsoTimestampDefault = sql`(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))`;
+
 const timestampColumns = {
-  createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
-  updatedAt: text('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
+  createdAt: text('created_at').notNull().default(sqliteIsoTimestampDefault),
+  updatedAt: text('updated_at').notNull().default(sqliteIsoTimestampDefault),
 };
 
 export const theses = sqliteTable('theses', {

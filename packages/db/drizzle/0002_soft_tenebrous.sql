@@ -7,8 +7,8 @@ CREATE TABLE `__new_workflow_steps` (
 	`description` text NOT NULL,
 	`status` text NOT NULL,
 	`step_order` integer NOT NULL,
-	`created_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
-	`updated_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL,
+	`created_at` text DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW')) NOT NULL,
+	`updated_at` text DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW')) NOT NULL,
 	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`workflow_pack_id`) REFERENCES `workflow_packs`(`id`) ON UPDATE no action ON DELETE cascade
 );

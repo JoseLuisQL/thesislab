@@ -20,6 +20,12 @@ describe('persistence helpers', () => {
     expect(createTimestamp(new Date('2026-03-09T10:11:12.130Z'))).toBe('2026-03-09T10:11:12.130Z');
   });
 
+  it('matches the canonical SQLite default timestamp shape', () => {
+    expect(createTimestamp(new Date('2026-03-09T10:11:12.130Z'))).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+  });
+
   it('exposes stable helper functions through the shared factory', () => {
     const helpers = createPersistenceHelpers();
     const nowSpy = vi.spyOn(helpers, 'now');

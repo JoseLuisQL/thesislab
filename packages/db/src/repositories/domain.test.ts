@@ -230,6 +230,31 @@ describe('domain repository boundaries', () => {
     connection.sqlite.close();
   });
 
+  it('keeps repository helper timestamps aligned with database default timestamps', async () => {
+    const connection = createDatabaseConnection(databaseUrl);
+    const migrationSql = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../drizzle/0000_domain_core.sql'),
+      'utf8',
+    );
+    await connection.sqlite.executeMultiple(migrationSql);
+    const registry = createDomainRepositoryRegistry(connection.db);
+
+    const helperTimestamp = registry.helpers.now();
+
+    await connection.sqlite.execute(`
+      INSERT INTO policy_profiles (id, institution, faculty, version, title)
+      VALUES ('policy-default-timestamps', 'Universidad Demo', 'Ingeniería', '2026.1', 'Perfil principal')
+    `);
+
+    const policy = await registry.repositories.policyProfiles.findById('policy-default-timestamps');
+
+    expect(helperTimestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(policy?.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(policy?.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+
+    connection.sqlite.close();
+  });
+
   it('re-exports the committed registry helper surface for downstream consumers', async () => {
     const connection = createDatabaseConnection(databaseUrl);
     const migrationSql = fs.readFileSync(

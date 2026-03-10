@@ -99,6 +99,30 @@ describe('schema migrations', () => {
     connection.sqlite.close();
   });
 
+  it('uses the same ISO-8601 UTC timestamp contract for schema defaults as repository helpers', async () => {
+    const databaseUrl = createTempDatabaseUrl('thesis-db-timestamps-');
+    const migrationSql = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../drizzle/0000_domain_core.sql'),
+      'utf8',
+    );
+
+    const connection = createDatabaseConnection(databaseUrl);
+    await connection.sqlite.executeMultiple(migrationSql);
+
+    await connection.sqlite.execute(`
+      INSERT INTO policy_profiles (id, institution, faculty, version, title)
+      VALUES ('policy-timestamps-1', 'Universidad Demo', 'Ingeniería', '2026.1', 'Perfil principal')
+    `);
+
+    const policy = await connection.db.select().from(policyProfiles).where(eq(policyProfiles.id, 'policy-timestamps-1')).get();
+
+    expect(policy).toBeTruthy();
+    expect(policy?.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(policy?.updatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+
+    connection.sqlite.close();
+  });
+
   it('rejects orphaned cross-entity references through enforced foreign keys', () => {
     const databaseUrl = createTempDatabaseUrl('thesis-db-relations-');
     const databasePath = path.resolve('/root/thesislab', databaseUrl.slice('file:'.length));

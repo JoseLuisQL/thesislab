@@ -90,7 +90,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -98,7 +98,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -228,7 +228,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -236,7 +236,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -348,7 +348,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -356,7 +356,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -464,7 +464,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -472,7 +472,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -539,7 +539,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -547,7 +547,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {
@@ -657,7 +657,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -665,7 +665,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -780,7 +780,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -788,7 +788,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -933,7 +933,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -941,7 +941,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -1064,7 +1064,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -1072,7 +1072,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -1185,7 +1185,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -1193,7 +1193,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -1305,7 +1305,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -1313,7 +1313,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -1437,7 +1437,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -1445,7 +1445,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -1562,7 +1562,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -1570,7 +1570,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -1653,7 +1653,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -1661,7 +1661,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -1777,7 +1777,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -1785,7 +1785,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {
@@ -1876,7 +1876,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -1884,7 +1884,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -1958,7 +1958,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -1966,7 +1966,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -2047,7 +2047,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -2055,7 +2055,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -2144,7 +2144,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -2152,7 +2152,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -2269,7 +2269,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -2277,7 +2277,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
@@ -2400,7 +2400,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         },
         "updated_at": {
           "name": "updated_at",
@@ -2408,7 +2408,7 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false,
-          "default": "CURRENT_TIMESTAMP"
+          "default": "(STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW'))"
         }
       },
       "indexes": {},
