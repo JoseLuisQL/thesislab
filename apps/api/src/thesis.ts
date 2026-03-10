@@ -1,8 +1,9 @@
-import { eq } from 'drizzle-orm';
+import { asc, desc, eq } from 'drizzle-orm';
 
 import {
   createDatabaseConnection,
-  createDomainRepositories,
+  checkpoints,
+  feedbackEntries,
   thesisStates,
   theses,
   type ThesisDbClient,
@@ -57,6 +58,44 @@ export type ThesisDetailPayload = {
   transitions: ThesisStatePayload[];
 };
 
+export type ThesisCheckpointPayload = {
+  id: string;
+  thesisId: string;
+  label: string | null;
+  note: string | null;
+  scope: string;
+  reason: string;
+  snapshotPath: string | null;
+  createdBy: string;
+  checkpointedAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ThesisFeedbackPayload = {
+  id: string;
+  thesisId: string;
+  sourceType: 'user' | 'system' | 'qa' | 'compliance';
+  body: string;
+  summary: string | null;
+  recordedAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ThesisFeedbackSource = ThesisFeedbackPayload['sourceType'];
+
+export type ThesisResumePayload = {
+  thesis: ThesisRecordPayload;
+  state: ThesisLifecycleState;
+  latestStatusAt: string;
+  statusSummary: string;
+  blockers: ThesisBlockers;
+  nextAction: string;
+  latestCheckpoint: ThesisCheckpointPayload | null;
+  recentFeedback: ThesisFeedbackPayload[];
+};
+
 export type CreateThesisInput = {
   title: string;
   degreeProgram: string;
@@ -75,6 +114,23 @@ export type TransitionThesisInput = {
   statusSummary: string;
   blockers?: ThesisBlockers;
   nextStepSummary?: string;
+};
+
+export type CreateCheckpointInput = {
+  label?: string | null;
+  note?: string | null;
+  scope: string;
+  reason: string;
+  snapshotPath?: string | null;
+  createdBy: string;
+  checkpointedAt?: string;
+};
+
+export type CreateFeedbackInput = {
+  sourceType: 'user' | 'system' | 'qa' | 'compliance';
+  body: string;
+  summary?: string | null;
+  recordedAt?: string;
 };
 
 export class ThesisNotFoundError extends Error {
@@ -162,14 +218,8 @@ export class ThesisLifecycleService {
       .map((transition) => this.mapStateRecord(transition));
 
     const currentTransition = transitions.find((transition) => transition.isCurrent) ?? transitions[0];
-    const checkpoints = await this.db.query.checkpoints.findMany({
-      where: (fields, operators) => operators.eq(fields.thesisId, thesisId),
-      orderBy: (fields, operators) => [operators.desc(fields.createdAt), operators.asc(fields.id)],
-    });
-    const feedbackEntries = await this.db.query.feedbackEntries.findMany({
-      where: (fields, operators) => operators.eq(fields.thesisId, thesisId),
-      orderBy: (fields, operators) => [operators.desc(fields.createdAt), operators.asc(fields.id)],
-    });
+    const checkpoints = await this.listCheckpoints(thesisId);
+    const feedbackEntries = await this.listFeedback(thesisId);
 
     return {
       thesis: this.mapThesisRecord(thesis),
@@ -262,6 +312,123 @@ export class ThesisLifecycleService {
     return this.getThesisDetail(thesisId);
   }
 
+  async createCheckpoint(thesisId: string, input: CreateCheckpointInput): Promise<ThesisCheckpointPayload> {
+    await this.requireThesis(thesisId);
+
+    const now = new Date().toISOString();
+    const checkpointedAt = input.checkpointedAt ?? now;
+    const id = randomUUID();
+
+    await this.db.insert(checkpoints).values({
+      id,
+      thesisId,
+      label: input.label ?? null,
+      note: input.note ?? null,
+      scope: input.scope,
+      reason: input.reason,
+      snapshotPath: input.snapshotPath ?? null,
+      createdBy: input.createdBy,
+      checkpointedAt,
+      createdAt: checkpointedAt,
+      updatedAt: checkpointedAt,
+    });
+
+    const checkpoint = await this.db.query.checkpoints.findFirst({
+      where: (fields, operators) => operators.eq(fields.id, id),
+    });
+
+    return this.mapCheckpointRecord(checkpoint ?? {
+      id,
+      thesisId,
+      label: input.label ?? null,
+      note: input.note ?? null,
+      scope: input.scope,
+      reason: input.reason,
+      snapshotPath: input.snapshotPath ?? null,
+      createdBy: input.createdBy,
+      checkpointedAt,
+      createdAt: checkpointedAt,
+      updatedAt: checkpointedAt,
+    });
+  }
+
+  async listCheckpoints(thesisId: string): Promise<ThesisCheckpointPayload[]> {
+    await this.requireThesis(thesisId);
+
+    const rows = await this.db
+      .select()
+      .from(checkpoints)
+      .where(eq(checkpoints.thesisId, thesisId))
+      .orderBy(desc(checkpoints.checkpointedAt), asc(checkpoints.id))
+      .all();
+
+    return rows.map((row) => this.mapCheckpointRecord(row));
+  }
+
+  async createFeedback(thesisId: string, input: CreateFeedbackInput): Promise<ThesisFeedbackPayload> {
+    await this.requireThesis(thesisId);
+
+    const now = new Date().toISOString();
+    const recordedAt = input.recordedAt ?? now;
+    const id = randomUUID();
+
+    await this.db.insert(feedbackEntries).values({
+      id,
+      thesisId,
+      sourceType: input.sourceType,
+      body: input.body,
+      summary: input.summary ?? summarizeFeedback(input.body),
+      recordedAt,
+      createdAt: recordedAt,
+      updatedAt: recordedAt,
+    });
+
+    const feedback = await this.db.query.feedbackEntries.findFirst({
+      where: (fields, operators) => operators.eq(fields.id, id),
+    });
+
+    return this.mapFeedbackRecord(feedback ?? {
+      id,
+      thesisId,
+      sourceType: input.sourceType,
+      body: input.body,
+      summary: input.summary ?? summarizeFeedback(input.body),
+      recordedAt,
+      createdAt: recordedAt,
+      updatedAt: recordedAt,
+    });
+  }
+
+  async listFeedback(thesisId: string): Promise<ThesisFeedbackPayload[]> {
+    await this.requireThesis(thesisId);
+
+    const rows = await this.db
+      .select()
+      .from(feedbackEntries)
+      .where(eq(feedbackEntries.thesisId, thesisId))
+      .orderBy(desc(feedbackEntries.recordedAt), asc(feedbackEntries.id))
+      .all();
+
+    return rows.map((row) => this.mapFeedbackRecord(row));
+  }
+
+  async getResume(thesisId: string): Promise<ThesisResumePayload> {
+    const detail = await this.getThesisDetail(thesisId);
+    const checkpoints = await this.listCheckpoints(thesisId);
+    const feedback = await this.listFeedback(thesisId);
+
+    return {
+      thesis: detail.thesis,
+      state: detail.state,
+      latestStatusAt: detail.latestStatusAt,
+      statusSummary: detail.statusSummary,
+      blockers: detail.blockers,
+      nextAction: detail.nextStepSummary,
+      latestCheckpoint: checkpoints[0] ?? null,
+      recentFeedback: feedback.slice(0, 5),
+    };
+  }
+
   private async createUniqueSlug(title: string, thesisIdToExclude?: string): Promise<string> {
     const base = slugify(title);
     let candidate = base;
@@ -280,6 +447,18 @@ export class ThesisLifecycleService {
       suffix += 1;
       candidate = `${base}-${suffix}`;
     }
+  }
+
+  private async requireThesis(thesisId: string) {
+    const thesis = await this.db.query.theses.findFirst({
+      where: (fields, operators) => operators.eq(fields.id, thesisId),
+    });
+
+    if (!thesis) {
+      throw new ThesisNotFoundError(thesisId);
+    }
+
+    return thesis;
   }
 
   private mapThesisRecord(record: ThesisRecordPayload | {
@@ -331,6 +510,38 @@ export class ThesisLifecycleService {
       updatedAt: record.updatedAt,
     };
   }
+
+  private mapCheckpointRecord(record: {
+    id: string;
+    thesisId: string;
+    label: string | null;
+    note: string | null;
+    scope: string;
+    reason: string;
+    snapshotPath: string | null;
+    createdBy: string;
+    checkpointedAt: string;
+    createdAt: string;
+    updatedAt: string;
+  }): ThesisCheckpointPayload {
+    return { ...record };
+  }
+
+  private mapFeedbackRecord(record: {
+    id: string;
+    thesisId: string;
+    sourceType: string;
+    body: string;
+    summary: string | null;
+    recordedAt: string;
+    createdAt: string;
+    updatedAt: string;
+  }): ThesisFeedbackPayload {
+    return {
+      ...record,
+      sourceType: normalizeFeedbackSource(record.sourceType),
+    };
+  }
 }
 
 export function createThesisLifecycleService(databaseUrl?: string) {
@@ -361,4 +572,21 @@ function slugify(value: string): string {
     .replace(/-{2,}/g, '-');
 
   return normalized || 'tesis';
+}
+
+function summarizeFeedback(body: string): string {
+  const normalized = body.trim().replace(/\s+/g, ' ');
+  return normalized.length <= 120 ? normalized : `${normalized.slice(0, 117)}...`;
+}
+
+function normalizeFeedbackSource(value: string): ThesisFeedbackSource {
+  switch (value) {
+    case 'user':
+    case 'system':
+    case 'qa':
+    case 'compliance':
+      return value;
+    default:
+      return 'system';
+  }
 }

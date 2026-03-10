@@ -8,6 +8,8 @@ import { createDatabaseConnection, getMigrationsDirectory } from '@thesis-resear
 
 import { buildLocalFirstStatusPayload } from './status.js';
 import {
+  type CreateCheckpointInput,
+  type CreateFeedbackInput,
   ThesisNotFoundError,
   createThesisLifecycleService,
   type TransitionThesisInput,
@@ -32,6 +34,23 @@ const transitionThesisSchema = z.object({
   statusSummary: z.string().trim().min(1),
   blockers: z.array(z.string().trim().min(1)).optional(),
   nextStepSummary: z.string().trim().min(1).optional(),
+});
+
+const createCheckpointSchema = z.object({
+  label: z.string().trim().min(1).nullable().optional(),
+  note: z.string().trim().min(1).nullable().optional(),
+  scope: z.string().trim().min(1),
+  reason: z.string().trim().min(1),
+  snapshotPath: z.string().trim().min(1).nullable().optional(),
+  createdBy: z.string().trim().min(1),
+  checkpointedAt: z.string().datetime().optional(),
+});
+
+const createFeedbackSchema = z.object({
+  sourceType: z.enum(['user', 'system', 'qa', 'compliance']),
+  body: z.string().trim().min(1),
+  summary: z.string().trim().min(1).nullable().optional(),
+  recordedAt: z.string().datetime().optional(),
 });
 
 export function createApp() {
@@ -127,6 +146,55 @@ export function createApp() {
     );
 
     return { ok: true, thesis };
+  });
+
+  app.post('/theses/:thesisId/checkpoints', async (request, reply) => {
+    const payload = createCheckpointSchema.parse(request.body) as CreateCheckpointInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const checkpoint = await (await getThesisLifecycle()).service.createCheckpoint(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, checkpoint });
+  });
+
+  app.get('/theses/:thesisId/checkpoints', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const checkpoints = await (await getThesisLifecycle()).service.listCheckpoints(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, checkpoints };
+  });
+
+  app.post('/theses/:thesisId/feedback', async (request, reply) => {
+    const payload = createFeedbackSchema.parse(request.body) as CreateFeedbackInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const feedback = await (await getThesisLifecycle()).service.createFeedback(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, feedback });
+  });
+
+  app.get('/theses/:thesisId/feedback', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const feedback = await (await getThesisLifecycle()).service.listFeedback(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, feedback };
+  });
+
+  app.get('/theses/:thesisId/resume', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const resume = await (await getThesisLifecycle()).service.getResume(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, resume };
   });
 
   return app;

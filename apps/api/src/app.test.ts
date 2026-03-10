@@ -489,4 +489,209 @@ describe('thesis lifecycle registry routes', () => {
       message: 'Thesis does-not-exist was not found.',
     });
   });
+
+  it('creates thesis-scoped checkpoints and feedback, returns deterministic newest-first ordering, and aggregates resume context', async () => {
+    const thesisAResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis A',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-a-memory',
+      },
+    });
+    const thesisBResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis B',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-b-memory',
+      },
+    });
+
+    const thesisAId = (thesisAResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const thesisBId = (thesisBResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisAId}/state`,
+      payload: {
+        state: 'blocked',
+        source: 'user:review',
+        statusSummary: 'Pendiente de comentarios del tutor.',
+        blockers: ['Esperando comentarios del tutor'],
+        nextStepSummary: 'Revisa el feedback recibido y planifica la siguiente iteración.',
+      },
+    });
+
+    const checkpointOlder = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisAId}/checkpoints`,
+      payload: {
+        label: 'Checkpoint anterior',
+        note: 'Versión previa',
+        scope: 'chapter:introduction',
+        reason: 'before-feedback',
+        createdBy: 'user:test',
+        checkpointedAt: '2026-03-10T09:00:00.000Z',
+      },
+    });
+    const checkpointNewer = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisAId}/checkpoints`,
+      payload: {
+        label: 'Checkpoint reciente',
+        note: 'Versión más nueva',
+        scope: 'workspace',
+        reason: 'after-feedback',
+        createdBy: 'user:test',
+        checkpointedAt: '2026-03-10T10:00:00.000Z',
+      },
+    });
+    await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisBId}/checkpoints`,
+      payload: {
+        label: 'Checkpoint thesis B',
+        scope: 'workspace',
+        reason: 'other-thesis',
+        createdBy: 'user:test',
+        checkpointedAt: '2026-03-10T11:00:00.000Z',
+      },
+    });
+
+    const feedbackOlder = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisAId}/feedback`,
+      payload: {
+        sourceType: 'user',
+        body: 'Debo mejorar la introducción con más contexto empírico.',
+        recordedAt: '2026-03-10T09:30:00.000Z',
+      },
+    });
+    const feedbackNewer = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisAId}/feedback`,
+      payload: {
+        sourceType: 'qa',
+        body: 'El capítulo uno necesita conectar mejor la pregunta de investigación con el marco teórico.',
+        summary: 'Alinear pregunta y marco teórico',
+        recordedAt: '2026-03-10T10:30:00.000Z',
+      },
+    });
+    await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisBId}/feedback`,
+      payload: {
+        sourceType: 'system',
+        body: 'Feedback de otra tesis',
+        recordedAt: '2026-03-10T11:30:00.000Z',
+      },
+    });
+
+    expect(checkpointOlder.statusCode).toBe(201);
+    expect(checkpointNewer.statusCode).toBe(201);
+    expect(feedbackOlder.statusCode).toBe(201);
+    expect(feedbackNewer.statusCode).toBe(201);
+
+    const checkpointList = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisAId}/checkpoints`,
+    });
+    const feedbackList = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisAId}/feedback`,
+    });
+    const resumeResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisAId}/resume`,
+    });
+
+    expect(checkpointList.statusCode).toBe(200);
+    expect(feedbackList.statusCode).toBe(200);
+    expect(resumeResponse.statusCode).toBe(200);
+
+    const checkpointPayload = checkpointList.json() as {
+      checkpoints: Array<{ id: string; thesisId: string; label: string | null; scope: string; reason: string }>;
+    };
+    const feedbackPayload = feedbackList.json() as {
+      feedback: Array<{ id: string; thesisId: string; sourceType: string; body: string; summary: string | null }>;
+    };
+    const resumePayload = resumeResponse.json() as {
+      resume: {
+        thesis: { id: string };
+        blockers: string[];
+        nextAction: string;
+        latestCheckpoint: { id: string; thesisId: string; label: string | null; scope: string; reason: string } | null;
+        recentFeedback: Array<{ id: string; thesisId: string; sourceType: string; body: string; summary: string | null }>;
+      };
+    };
+
+    expect(checkpointPayload.checkpoints).toHaveLength(2);
+    expect(checkpointPayload.checkpoints.map((checkpoint) => checkpoint.id)).toEqual([
+      (checkpointNewer.json() as { checkpoint: { id: string } }).checkpoint.id,
+      (checkpointOlder.json() as { checkpoint: { id: string } }).checkpoint.id,
+    ]);
+    expect(checkpointPayload.checkpoints[0]).toMatchObject({
+      thesisId: thesisAId,
+      label: 'Checkpoint reciente',
+      scope: 'workspace',
+      reason: 'after-feedback',
+    });
+
+    expect(feedbackPayload.feedback).toHaveLength(2);
+    expect(feedbackPayload.feedback.map((entry) => entry.id)).toEqual([
+      (feedbackNewer.json() as { feedback: { id: string } }).feedback.id,
+      (feedbackOlder.json() as { feedback: { id: string } }).feedback.id,
+    ]);
+    expect(feedbackPayload.feedback[0]).toMatchObject({
+      thesisId: thesisAId,
+      sourceType: 'qa',
+      summary: 'Alinear pregunta y marco teórico',
+    });
+    expect(feedbackPayload.feedback[1]?.summary).toMatch(/Debo mejorar la introducción/i);
+
+    expect(resumePayload.resume.thesis.id).toBe(thesisAId);
+    expect(resumePayload.resume.blockers).toEqual(['Esperando comentarios del tutor']);
+    expect(resumePayload.resume.nextAction).toBe('Revisa el feedback recibido y planifica la siguiente iteración.');
+    expect(resumePayload.resume.latestCheckpoint).toMatchObject({
+      id: (checkpointNewer.json() as { checkpoint: { id: string } }).checkpoint.id,
+      thesisId: thesisAId,
+      label: 'Checkpoint reciente',
+      scope: 'workspace',
+      reason: 'after-feedback',
+    });
+    expect(resumePayload.resume.recentFeedback.map((entry) => entry.id)).toEqual([
+      (feedbackNewer.json() as { feedback: { id: string } }).feedback.id,
+      (feedbackOlder.json() as { feedback: { id: string } }).feedback.id,
+    ]);
+    expect(resumePayload.resume.recentFeedback.every((entry) => entry.thesisId === thesisAId)).toBe(true);
+  });
+
+  it('fails safely for unknown thesis memory and resume routes', async () => {
+    const checkpointResponse = await app.inject({
+      method: 'GET',
+      url: '/theses/does-not-exist/checkpoints',
+    });
+    const feedbackResponse = await app.inject({
+      method: 'GET',
+      url: '/theses/does-not-exist/feedback',
+    });
+    const resumeResponse = await app.inject({
+      method: 'GET',
+      url: '/theses/does-not-exist/resume',
+    });
+
+    for (const response of [checkpointResponse, feedbackResponse, resumeResponse]) {
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({
+        ok: false,
+        code: 'THESIS_NOT_FOUND',
+        message: 'Thesis does-not-exist was not found.',
+      });
+    }
+  });
 });
