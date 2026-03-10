@@ -59,6 +59,12 @@ type IntakeReportSummary = {
       unavailable: number;
     };
   } | null;
+  replacement: {
+    isReimport: boolean;
+    replacesIntakeJobId: string;
+    recoverableCheckpointId: string;
+    supersedesWorkspace: boolean;
+  } | null;
   warnings: string[];
   failures: IntakeFailureDiagnostic[];
   recommendedNextSteps: IntakeReportRecommendation[];
@@ -112,7 +118,19 @@ export type ThesisDetailPayload = {
   feedbackCount: number;
   latestCheckpointId: string | null;
   latestFeedbackId: string | null;
+  activeWorkspace: ActiveWorkspacePayload | null;
   transitions: ThesisStatePayload[];
+};
+
+export type ActiveWorkspacePayload = {
+  intakeJobId: string;
+  detectedFormat: SourceFormat;
+  entrypoint: string | null;
+  nodeCount: number;
+  rootNodeIds: string[];
+  replacementOfIntakeJobId: string | null;
+  replacedByIntakeJobId: string | null;
+  recoverableCheckpointId: string | null;
 };
 
 export type ThesisCheckpointPayload = {
@@ -151,6 +169,7 @@ export type ThesisResumePayload = {
   nextAction: string;
   latestCheckpoint: ThesisCheckpointPayload | null;
   recentFeedback: ThesisFeedbackPayload[];
+  activeWorkspace: ActiveWorkspacePayload | null;
 };
 
 export type IntakeJobPayload = {
@@ -332,6 +351,7 @@ export class ThesisLifecycleService {
     const currentTransition = transitions.find((transition) => transition.isCurrent) ?? transitions[0];
     const checkpoints = await this.listCheckpoints(thesisId);
     const feedbackEntries = await this.listFeedback(thesisId);
+    const activeWorkspace = await this.getActiveWorkspace(thesis.id, thesis.activeImportId);
 
     return {
       thesis: this.mapThesisRecord(thesis),
@@ -344,6 +364,7 @@ export class ThesisLifecycleService {
       feedbackCount: feedbackEntries.length,
       latestCheckpointId: checkpoints[0]?.id ?? null,
       latestFeedbackId: feedbackEntries[0]?.id ?? null,
+      activeWorkspace,
       transitions,
     };
   }
@@ -538,6 +559,7 @@ export class ThesisLifecycleService {
       nextAction: detail.nextStepSummary,
       latestCheckpoint: checkpoints[0] ?? null,
       recentFeedback: feedback.slice(0, 5),
+      activeWorkspace: detail.activeWorkspace,
     };
   }
 
@@ -566,6 +588,7 @@ export class ThesisLifecycleService {
         normalizationStatus: 'not_started',
         structureSummary: null,
         normalizationSummary: null,
+        replacement: null,
         warnings: [],
         failures: [],
         recommendedNextSteps: [],
@@ -610,6 +633,7 @@ export class ThesisLifecycleService {
         normalizationStatus: job.report?.normalizationStatus ?? 'not_started',
         structureSummary: job.report?.structureSummary ?? null,
         normalizationSummary: job.report?.normalizationSummary ?? null,
+        replacement: job.report?.replacement ?? null,
         warnings: job.warnings,
         failures: job.report?.failures ?? [],
         recommendedNextSteps: job.recommendations,
@@ -621,6 +645,8 @@ export class ThesisLifecycleService {
 
   private async runIntakeJob(thesisId: string, intakeJobId: string) {
     const job = await this.getIntakeJob(thesisId, intakeJobId);
+    const thesis = await this.requireThesis(thesisId);
+    const priorActiveImportId = thesis.activeImportId;
     const startedAt = new Date().toISOString();
 
     await this.db
@@ -634,11 +660,78 @@ export class ThesisLifecycleService {
 
     const outcome = await performIntakeInspection(thesisId, intakeJobId, job.importRootPath, job.detection);
     const completedAt = new Date().toISOString();
+    let recoverableCheckpointId: string | null = null;
+
+    if (outcome.status === 'succeeded' && priorActiveImportId && priorActiveImportId !== intakeJobId) {
+      const checkpoint = await this.createCheckpoint(thesisId, {
+        label: 'Checkpoint previo a reimportación',
+        note: `Preserva el workspace activo anterior ${priorActiveImportId} antes de activar ${intakeJobId}.`,
+        scope: 'intake-workspace',
+        reason: 'before-reimport-replacement',
+        createdBy: 'system:intake-reimport',
+        checkpointedAt: completedAt,
+      });
+      recoverableCheckpointId = checkpoint.id;
+    }
+
+    const recommendations = buildIntakeRecommendations({
+      terminalStatus: outcome.status,
+      failures: outcome.report.failures,
+      structureSummary: outcome.report.structureSummary,
+      normalizationSummary: outcome.report.normalizationSummary,
+      priorActiveImportId,
+      recoverableCheckpointId,
+    });
+    const report: IntakeReportSummary = {
+      ...outcome.report,
+      replacement: priorActiveImportId && outcome.status === 'succeeded' && recoverableCheckpointId
+        ? {
+            isReimport: true,
+            replacesIntakeJobId: priorActiveImportId,
+            recoverableCheckpointId,
+            supersedesWorkspace: true,
+          }
+        : null,
+      warnings: [
+        ...outcome.report.warnings,
+        ...(priorActiveImportId && outcome.status === 'succeeded'
+          ? [`La re-importación sustituye explícitamente el workspace activo ${priorActiveImportId} y conserva un checkpoint recuperable.`]
+          : []),
+      ],
+      recommendedNextSteps: recommendations,
+    };
 
     await this.db.transaction(async (tx) => {
       await tx
         .delete(normalizedNodes)
         .where(eq(normalizedNodes.intakeJobId, intakeJobId));
+
+      if (false) {
+        const priorNodes = await tx
+          .select()
+          .from(normalizedNodes)
+          .where(eq(normalizedNodes.intakeJobId, priorActiveImportId as string))
+          .orderBy(asc(normalizedNodes.ordinal), asc(normalizedNodes.id))
+          .all();
+
+        const idMap = new Map<string, string>();
+        const clonedPriorNodes = priorNodes.map((node) => {
+          const clonedId = `${node.id}:reimport:${intakeJobId}`;
+          idMap.set(node.id, clonedId);
+          return {
+            ...node,
+            id: clonedId,
+            intakeJobId,
+          };
+        }).map((node) => ({
+          ...node,
+          parentNodeId: node.parentNodeId ? (idMap.get(node.parentNodeId) ?? null) : null,
+        }));
+
+        if (clonedPriorNodes.length > 0) {
+          await tx.insert(normalizedNodes).values(clonedPriorNodes);
+        }
+      }
 
       if (outcome.status !== 'failed' && outcome.normalizedNodes.length > 0) {
         await tx.insert(normalizedNodes).values(outcome.normalizedNodes);
@@ -650,14 +743,60 @@ export class ThesisLifecycleService {
           sourceFormat: outcome.detection.format,
           status: outcome.status,
           detectedEntrypoint: outcome.detectedEntrypoint,
-          reportJson: JSON.stringify(outcome.report),
-          warningsJson: JSON.stringify(outcome.report.warnings),
-          recommendationsJson: JSON.stringify(outcome.report.recommendedNextSteps),
+          reportJson: JSON.stringify(report),
+          warningsJson: JSON.stringify(report.warnings),
+          recommendationsJson: JSON.stringify(report.recommendedNextSteps),
           startedAt,
           completedAt,
           updatedAt: completedAt,
         })
         .where(eq(intakeJobs.id, intakeJobId));
+
+      if (outcome.status === 'succeeded') {
+        await tx
+          .update(theses)
+          .set({
+            currentState: 'active',
+            latestStatusAt: completedAt,
+            nextStepSummary: summarizeRecommendedNextStep(recommendations),
+            activeImportId: intakeJobId,
+            updatedAt: completedAt,
+          })
+          .where(eq(theses.id, thesisId));
+
+        await tx
+          .update(thesisStates)
+          .set({
+            isCurrent: false,
+            updatedAt: completedAt,
+          })
+          .where(eq(thesisStates.thesisId, thesisId));
+
+        await tx.insert(thesisStates).values({
+          id: randomUUID(),
+          thesisId,
+          state: 'active',
+          source: priorActiveImportId ? 'system:intake-reimport' : 'system:intake-complete',
+          statusSummary: priorActiveImportId
+            ? `Re-importación completada; el workspace activo ahora usa ${intakeJobId} en lugar de ${priorActiveImportId}.`
+            : `Importación completada; el workspace activo ahora usa ${intakeJobId}.`,
+          blockersJson: JSON.stringify([]),
+          transitionedFrom: thesis.currentState,
+          transitionedAt: completedAt,
+          isCurrent: true,
+          createdAt: completedAt,
+          updatedAt: completedAt,
+        });
+      } else {
+        await tx
+          .update(theses)
+          .set({
+            latestStatusAt: completedAt,
+            nextStepSummary: summarizeRecommendedNextStep(recommendations),
+            updatedAt: completedAt,
+          })
+          .where(eq(theses.id, thesisId));
+      }
     });
   }
 
@@ -693,6 +832,34 @@ export class ThesisLifecycleService {
       suffix += 1;
       candidate = `${base}-${suffix}`;
     }
+  }
+
+  private async getActiveWorkspace(thesisId: string, activeImportId: string | null): Promise<ActiveWorkspacePayload | null> {
+    if (!activeImportId) {
+      return null;
+    }
+
+    const activeJob = await this.db.query.intakeJobs.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, activeImportId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!activeJob) {
+      return null;
+    }
+
+    const report = parseIntakeReport(activeJob.reportJson);
+
+    return {
+      intakeJobId: activeJob.id,
+      detectedFormat: normalizeSourceFormat(activeJob.sourceFormat),
+      entrypoint: activeJob.detectedEntrypoint,
+      nodeCount: report?.normalizationSummary?.nodeCount ?? 0,
+      rootNodeIds: report?.normalizationSummary?.rootNodeIds ?? [],
+      replacementOfIntakeJobId: report?.replacement?.replacesIntakeJobId ?? null,
+      replacedByIntakeJobId: null,
+      recoverableCheckpointId: report?.replacement?.recoverableCheckpointId ?? null,
+    };
   }
 
   private async requireThesis(thesisId: string) {
@@ -928,6 +1095,58 @@ function parseIntakeReport(value: string): IntakeReportSummary | null {
   }
 }
 
+function buildIntakeRecommendations(input: {
+  terminalStatus: IntakeStatus;
+  failures: IntakeFailureDiagnostic[];
+  structureSummary: IntakeReportSummary['structureSummary'];
+  normalizationSummary: IntakeReportSummary['normalizationSummary'];
+  priorActiveImportId: string | null;
+  recoverableCheckpointId: string | null;
+}): IntakeReportRecommendation[] {
+  if (input.terminalStatus !== 'succeeded') {
+    return [
+      {
+        code: 'FIX_IMPORT_SOURCE',
+        message: 'Repair or replace the source input, then retry the import.',
+        triggeredBy: input.failures.map((failure) => failure.code),
+      },
+    ];
+  }
+
+  const recommendations: IntakeReportRecommendation[] = [
+    {
+      code: 'ACTIVATE_IMPORTED_WORKSPACE',
+      message: 'El workspace importado ya es el activo; continúa desde la estructura normalizada.',
+      triggeredBy: ['finding:structure:ready', 'finding:normalization:complete'],
+    },
+  ];
+
+  if (input.priorActiveImportId && input.recoverableCheckpointId) {
+    recommendations.push({
+      code: 'REVIEW_REIMPORT_REPLACEMENT',
+      message: 'La re-importación sustituyó explícitamente el workspace activo; usa el checkpoint recuperable si necesitas restaurar la versión previa.',
+      triggeredBy: [`reimport:replaces:${input.priorActiveImportId}`, `checkpoint:${input.recoverableCheckpointId}`],
+    });
+  }
+
+  if (input.structureSummary && input.normalizationSummary) {
+    recommendations.push({
+      code: 'RUN_QA_ON_IMPORTED_STRUCTURE',
+      message: 'Ejecuta las siguientes verificaciones o retoma la edición sobre la estructura importada activa.',
+      triggeredBy: [
+        `finding:entrypoint:${input.structureSummary.entrypoint ?? 'unknown'}`,
+        `finding:root-node-count:${input.normalizationSummary.rootNodeIds.length}`,
+      ],
+    });
+  }
+
+  return recommendations;
+}
+
+function summarizeRecommendedNextStep(recommendations: IntakeReportRecommendation[]): string {
+  return recommendations[0]?.message ?? 'Review the latest thesis state and continue the next workflow step.';
+}
+
 function parseStringArray(value: string): string[] {
   try {
     const parsed = JSON.parse(value);
@@ -1038,6 +1257,7 @@ async function performIntakeInspection(
   let normalizationStatus: IntakeNormalizationStatus = 'completed';
   let structureSummary: IntakeReportSummary['structureSummary'] = null;
   let normalizationSummary: IntakeReportSummary['normalizationSummary'] = null;
+  let replacement: IntakeReportSummary['replacement'] = null;
   let detectedEntrypoint: string | null = null;
 
   if (!fs.existsSync(importRootPath)) {
@@ -1149,6 +1369,7 @@ async function performIntakeInspection(
     normalizationStatus,
     structureSummary,
     normalizationSummary,
+    replacement,
     warnings,
     failures,
     recommendedNextSteps: recommendations,
@@ -1291,6 +1512,7 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
   const visited = new Set<string>();
   const orderedFiles: string[] = [];
   const nodes: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>> = [];
+  const existingIds = new Set<string>();
   const rootId = stableNodeId('latex', path.relative(rootDir, entrypoint), 'document', 0, 'document');
 
   const rootContent = fs.readFileSync(entrypoint, 'utf8');
@@ -1308,6 +1530,7 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   });
+  existingIds.add(rootId);
 
   const sectionStack: Array<{ level: number; id: string }> = [{ level: 0, id: rootId }];
 
@@ -1332,7 +1555,7 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
           sectionStack.pop();
         }
         const parentId = sectionStack[sectionStack.length - 1]?.id ?? rootId;
-        const id = stableNodeId('latex', relativePath, kind, lineNumber, title.trim());
+        const id = ensureUniqueNodeId(stableNodeId('latex', relativePath, kind, lineNumber, title.trim()), existingIds);
         nodes.push({
           id,
           parentNodeId: parentId,
@@ -1347,6 +1570,7 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         });
+        existingIds.add(id);
         sectionStack.push({ level, id });
       }
 
@@ -1509,6 +1733,21 @@ function extractPdfOutline(text: string, fileName: string) {
 
 function stableNodeId(format: string, sourcePath: string, nodeType: string, anchor: number, title: string) {
   return `${format}:${sourcePath}:${nodeType}:${anchor}:${slugify(title).slice(0, 48)}`;
+}
+
+function ensureUniqueNodeId(baseId: string, existingIds: Set<string>) {
+  if (!existingIds.has(baseId)) {
+    return baseId;
+  }
+
+  let suffix = 2;
+  let candidate = `${baseId}:${suffix}`;
+  while (existingIds.has(candidate)) {
+    suffix += 1;
+    candidate = `${baseId}:${suffix}`;
+  }
+
+  return candidate;
 }
 
 function collectTexFiles(rootDir: string) {
