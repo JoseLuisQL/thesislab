@@ -11,6 +11,7 @@ import {
   type CreateCheckpointInput,
   type CreateFeedbackInput,
   type CreateIntakeJobInput,
+  IntakeBoundaryViolationError,
   IntakeJobNotFoundError,
   ThesisNotFoundError,
   createThesisLifecycleService,
@@ -97,6 +98,17 @@ export function createApp() {
         ok: false,
         code: 'INTAKE_JOB_NOT_FOUND',
         message: error.message,
+      });
+    }
+
+    if (error instanceof IntakeBoundaryViolationError) {
+      return reply.status(400).send({
+        ok: false,
+        code: 'INTAKE_BOUNDARY_VIOLATION',
+        message: error.message,
+        thesisId: error.thesisId,
+        importRootPath: error.importRootPath,
+        resolvedPath: error.resolvedPath,
       });
     }
 
@@ -236,6 +248,14 @@ export function createApp() {
     const report = await (await getThesisLifecycle()).service.getIntakeReport(params.thesisId, params.intakeJobId);
 
     return { ok: true, report };
+  });
+
+  app.get('/theses/:thesisId/intake-jobs/:intakeJobId/nodes', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; intakeJobId: string };
+    const nodes = await (await getThesisLifecycle()).service.listNormalizedNodes(params.thesisId, params.intakeJobId);
+
+    return { ok: true, nodes };
   });
 
   return app;

@@ -51,6 +51,14 @@ type IntakeReportSummary = {
     itemCount: number;
     items: string[];
   } | null;
+  normalizationSummary: {
+    nodeCount: number;
+    rootNodeIds: string[];
+    provenanceCoverage: {
+      available: number;
+      unavailable: number;
+    };
+  } | null;
   warnings: string[];
   failures: IntakeFailureDiagnostic[];
   recommendedNextSteps: IntakeReportRecommendation[];
@@ -162,6 +170,24 @@ export type IntakeJobPayload = {
   updatedAt: string;
 };
 
+export type NormalizedNodePayload = {
+  id: string;
+  thesisId: string;
+  intakeJobId: string | null;
+  parentNodeId: string | null;
+  nodeType: string;
+  title: string | null;
+  content: string | null;
+  ordinal: number;
+  sourcePath: string | null;
+  sourceStart: string | null;
+  sourceEnd: string | null;
+  provenanceKind: string;
+  provenance: Record<string, unknown> | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type CreateIntakeJobInput = {
   importRootPath: string;
 };
@@ -214,6 +240,15 @@ export class IntakeJobNotFoundError extends Error {
   constructor(thesisId: string, intakeJobId: string) {
     super(`Intake job ${intakeJobId} was not found for thesis ${thesisId}.`);
     this.name = 'IntakeJobNotFoundError';
+  }
+}
+
+export class IntakeBoundaryViolationError extends Error {
+  constructor(public readonly thesisId: string, public readonly importRootPath: string, public readonly resolvedPath: string) {
+    super(
+      `Import path ${importRootPath} resolves outside thesis ${thesisId} workspace boundary: ${resolvedPath}.`,
+    );
+    this.name = 'IntakeBoundaryViolationError';
   }
 }
 
@@ -507,9 +542,9 @@ export class ThesisLifecycleService {
   }
 
   async createIntakeJob(thesisId: string, input: CreateIntakeJobInput): Promise<IntakeJobPayload> {
-    await this.requireThesis(thesisId);
+    const thesis = await this.requireThesis(thesisId);
 
-    const normalizedPath = path.resolve(input.importRootPath);
+    const normalizedPath = canonicalizeInsideBoundary(thesis.workspacePath, input.importRootPath, thesisId);
     const now = new Date().toISOString();
     const jobId = randomUUID();
     const detection = detectSourceFormat(normalizedPath);
@@ -530,6 +565,7 @@ export class ThesisLifecycleService {
         extractionStatus: 'not_started',
         normalizationStatus: 'not_started',
         structureSummary: null,
+        normalizationSummary: null,
         warnings: [],
         failures: [],
         recommendedNextSteps: [],
@@ -573,6 +609,7 @@ export class ThesisLifecycleService {
         extractionStatus: job.report?.extractionStatus ?? 'not_started',
         normalizationStatus: job.report?.normalizationStatus ?? 'not_started',
         structureSummary: job.report?.structureSummary ?? null,
+        normalizationSummary: job.report?.normalizationSummary ?? null,
         warnings: job.warnings,
         failures: job.report?.failures ?? [],
         recommendedNextSteps: job.recommendations,
@@ -622,6 +659,20 @@ export class ThesisLifecycleService {
         })
         .where(eq(intakeJobs.id, intakeJobId));
     });
+  }
+
+  async listNormalizedNodes(thesisId: string, intakeJobId: string): Promise<NormalizedNodePayload[]> {
+    await this.requireThesis(thesisId);
+    await this.getIntakeJob(thesisId, intakeJobId);
+
+    const rows = await this.db
+      .select()
+      .from(normalizedNodes)
+      .where(eq(normalizedNodes.intakeJobId, intakeJobId))
+      .orderBy(asc(normalizedNodes.ordinal), asc(normalizedNodes.id))
+      .all();
+
+    return rows.map((row) => this.mapNormalizedNodeRecord(row));
   }
 
   private async createUniqueSlug(title: string, thesisIdToExclude?: string): Promise<string> {
@@ -776,6 +827,26 @@ export class ThesisLifecycleService {
       sourceType: normalizeFeedbackSource(record.sourceType),
     };
   }
+
+  private mapNormalizedNodeRecord(record: typeof normalizedNodes.$inferSelect): NormalizedNodePayload {
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      intakeJobId: record.intakeJobId,
+      parentNodeId: record.parentNodeId,
+      nodeType: record.nodeType,
+      title: record.title,
+      content: record.content,
+      ordinal: record.ordinal,
+      sourcePath: record.sourcePath,
+      sourceStart: record.sourceStart,
+      sourceEnd: record.sourceEnd,
+      provenanceKind: record.provenanceKind,
+      provenance: parseJsonObject(record.provenanceJson),
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
 }
 
 export function createThesisLifecycleService(databaseUrl?: string) {
@@ -875,6 +946,30 @@ function parseRecommendations(value: string): IntakeReportRecommendation[] {
   }
 }
 
+function parseJsonObject(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function canonicalizeInsideBoundary(workspacePath: string, importRootPath: string, thesisId: string) {
+  const boundaryRoot = fs.realpathSync(path.resolve(workspacePath));
+  const requestedAbsolute = path.resolve(importRootPath);
+  const resolved = fs.realpathSync(requestedAbsolute);
+  const relative = path.relative(boundaryRoot, resolved);
+
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new IntakeBoundaryViolationError(thesisId, importRootPath, resolved);
+  }
+
+  return resolved;
+}
+
 function isRecommendation(value: unknown): value is IntakeReportRecommendation {
   return Boolean(
     value &&
@@ -942,6 +1037,7 @@ async function performIntakeInspection(
   let extractionStatus: IntakeExtractionStatus = 'completed';
   let normalizationStatus: IntakeNormalizationStatus = 'completed';
   let structureSummary: IntakeReportSummary['structureSummary'] = null;
+  let normalizationSummary: IntakeReportSummary['normalizationSummary'] = null;
   let detectedEntrypoint: string | null = null;
 
   if (!fs.existsSync(importRootPath)) {
@@ -1019,6 +1115,17 @@ async function performIntakeInspection(
   }
 
   if (status === 'succeeded') {
+    normalizationSummary = {
+      nodeCount: normalizedNodes.length,
+      rootNodeIds: normalizedNodes.filter((node) => node.parentNodeId === null).map((node) => node.id),
+      provenanceCoverage: {
+        available: normalizedNodes.filter((node) => node.provenanceKind !== 'unavailable').length,
+        unavailable: normalizedNodes.filter((node) => node.provenanceKind === 'unavailable').length,
+      },
+    };
+  }
+
+  if (status === 'succeeded') {
     recommendations.push({
       code: 'REVIEW_INTAKE_REPORT',
       message: 'Review the detected structure and continue with normalization or QA.',
@@ -1041,6 +1148,7 @@ async function performIntakeInspection(
     extractionStatus,
     normalizationStatus,
     structureSummary,
+    normalizationSummary,
     warnings,
     failures,
     recommendedNextSteps: recommendations,
@@ -1062,7 +1170,7 @@ function inspectLatexImport(importRootPath: string) {
   const normalizedNodeSeed: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>> = [];
 
   const texFiles = stats.isDirectory()
-    ? fs.readdirSync(importRootPath).filter((entry) => entry.toLowerCase().endsWith('.tex')).sort()
+    ? collectTexFiles(importRootPath)
     : [path.basename(importRootPath)];
   const rootDir = stats.isDirectory() ? importRootPath : path.dirname(importRootPath);
   const entrypoint = texFiles.find((entry) => entry.toLowerCase() === 'main.tex') ?? texFiles[0] ?? null;
@@ -1083,20 +1191,12 @@ function inspectLatexImport(importRootPath: string) {
         detail: absoluteEntrypoint,
       });
     } else {
-      normalizedNodeSeed.push({
-        id: randomUUID(),
-        parentNodeId: null,
-        nodeType: 'document',
-        title: path.basename(absoluteEntrypoint),
-        content: null,
-        sourcePath: path.relative(rootDir, absoluteEntrypoint) || path.basename(absoluteEntrypoint),
-        sourceStart: '1',
-        sourceEnd: String(content.split(/\r?\n/).length),
-        provenanceKind: 'latex',
-        provenanceJson: JSON.stringify({ kind: 'latex', entrypoint: absoluteEntrypoint }),
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      });
+      const graph = buildLatexGraph(rootDir, absoluteEntrypoint);
+      warnings.push(...graph.warnings);
+      failures.push(...graph.failures);
+      if (graph.failures.length === 0) {
+        normalizedNodeSeed.push(...graph.nodes);
+      }
     }
   }
 
@@ -1132,27 +1232,13 @@ function inspectDocxImport(importRootPath: string) {
     });
   } else {
     const xml = buffer.toString('utf8');
-    if (!xml.includes('word/document.xml')) {
-      warnings.push('DOCX container opened but inline XML relationships were not fully inspected in this lightweight parser.');
-    }
-    normalizedNodeSeed.push({
-      id: randomUUID(),
-      parentNodeId: null,
-      nodeType: 'document',
-      title: path.basename(importRootPath),
-      content: null,
-      sourcePath: path.basename(importRootPath),
-      sourceStart: 'document.xml',
-      sourceEnd: 'document.xml',
-      provenanceKind: 'docx',
-      provenanceJson: JSON.stringify({ kind: 'docx', file: importRootPath }),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
+    const outline = extractDocxOutline(xml, path.basename(importRootPath));
+    warnings.push(...outline.warnings);
+    normalizedNodeSeed.push(...outline.nodes);
     structureSummary = {
       entrypoint: 'word/document.xml',
-      itemCount: 1,
-      items: ['word/document.xml'],
+      itemCount: outline.items.length,
+      items: outline.items,
     };
   }
 
@@ -1179,21 +1265,9 @@ function inspectPdfImport(importRootPath: string) {
       detail: importRootPath,
     });
   } else {
-    warnings.push('PDF outline extraction is currently limited to container validation in this milestone.');
-    normalizedNodeSeed.push({
-      id: randomUUID(),
-      parentNodeId: null,
-      nodeType: 'document',
-      title: path.basename(importRootPath),
-      content: null,
-      sourcePath: path.basename(importRootPath),
-      sourceStart: 'page:1',
-      sourceEnd: 'page:1',
-      provenanceKind: 'pdf',
-      provenanceJson: JSON.stringify({ kind: 'pdf', file: importRootPath }),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
+    const outline = extractPdfOutline(buffer.toString('utf8'), path.basename(importRootPath));
+    warnings.push(...outline.warnings);
+    normalizedNodeSeed.push(...outline.nodes);
   }
 
   return {
@@ -1201,12 +1275,266 @@ function inspectPdfImport(importRootPath: string) {
     structureSummary: failures.length === 0
       ? {
           entrypoint: path.basename(importRootPath),
-          itemCount: 1,
-          items: ['page:1'],
+          itemCount: normalizedNodeSeed.length,
+          items: normalizedNodeSeed.map((node) => `${node.nodeType}:${node.title ?? 'untitled'}`),
         }
       : null,
     warnings,
     failures,
     normalizedNodes: failures.length === 0 ? normalizedNodeSeed : [],
   };
+}
+
+function buildLatexGraph(rootDir: string, entrypoint: string) {
+  const warnings: string[] = [];
+  const failures: IntakeFailureDiagnostic[] = [];
+  const visited = new Set<string>();
+  const orderedFiles: string[] = [];
+  const nodes: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>> = [];
+  const rootId = stableNodeId('latex', path.relative(rootDir, entrypoint), 'document', 0, 'document');
+
+  const rootContent = fs.readFileSync(entrypoint, 'utf8');
+  nodes.push({
+    id: rootId,
+    parentNodeId: null,
+    nodeType: 'document',
+    title: path.basename(entrypoint),
+    content: null,
+    sourcePath: path.relative(rootDir, entrypoint),
+    sourceStart: '1',
+    sourceEnd: String(rootContent.split(/\r?\n/).length),
+    provenanceKind: 'latex',
+    provenanceJson: JSON.stringify({ kind: 'latex', filePath: path.relative(rootDir, entrypoint), lineStart: 1, lineEnd: rootContent.split(/\r?\n/).length }),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  const sectionStack: Array<{ level: number; id: string }> = [{ level: 0, id: rootId }];
+
+  const visitFile = (absolutePath: string) => {
+    const relativePath = path.relative(rootDir, absolutePath);
+    if (visited.has(relativePath)) {
+      return;
+    }
+    visited.add(relativePath);
+    orderedFiles.push(relativePath);
+
+    const content = fs.readFileSync(absolutePath, 'utf8');
+    const lines = content.split(/\r?\n/);
+
+    lines.forEach((line, index) => {
+      const lineNumber = index + 1;
+      const headingMatch = line.match(/\\(chapter|section|subsection)\{([^}]*)\}/);
+      if (headingMatch) {
+        const [, kind, title] = headingMatch;
+        const level = kind === 'chapter' ? 1 : kind === 'section' ? 2 : 3;
+        while (sectionStack.length > 0 && sectionStack[sectionStack.length - 1]!.level >= level) {
+          sectionStack.pop();
+        }
+        const parentId = sectionStack[sectionStack.length - 1]?.id ?? rootId;
+        const id = stableNodeId('latex', relativePath, kind, lineNumber, title.trim());
+        nodes.push({
+          id,
+          parentNodeId: parentId,
+          nodeType: kind,
+          title: title.trim(),
+          content: null,
+          sourcePath: relativePath,
+          sourceStart: String(lineNumber),
+          sourceEnd: String(lineNumber),
+          provenanceKind: 'latex',
+          provenanceJson: JSON.stringify({ kind: 'latex', filePath: relativePath, lineStart: lineNumber, lineEnd: lineNumber }),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+        sectionStack.push({ level, id });
+      }
+
+      const includeMatch = line.match(/\\(?:input|include)\{([^}]*)\}/);
+      if (includeMatch) {
+        const rawTarget = includeMatch[1]!.trim();
+        const candidate = rawTarget.endsWith('.tex') ? rawTarget : `${rawTarget}.tex`;
+        const resolvedCandidate = path.resolve(path.dirname(absolutePath), candidate);
+        const resolvedPath = fs.existsSync(resolvedCandidate) ? fs.realpathSync(resolvedCandidate) : resolvedCandidate;
+        const relative = path.relative(rootDir, resolvedPath);
+
+        if (relative.startsWith('..') || path.isAbsolute(relative)) {
+          failures.push({
+            code: 'LATEX_INCLUDE_OUTSIDE_BOUNDARY',
+            message: 'A LaTeX include resolved outside the declared import boundary.',
+            detail: `${relativePath}:${lineNumber} -> ${resolvedPath}`,
+          });
+          return;
+        }
+
+        if (!fs.existsSync(resolvedPath)) {
+          warnings.push(`Unresolved LaTeX include ${candidate} from ${relativePath}:${lineNumber}.`);
+          return;
+        }
+
+        visitFile(fs.realpathSync(resolvedPath));
+      }
+    });
+  };
+
+  visitFile(fs.realpathSync(entrypoint));
+
+  return { nodes, warnings, failures, orderedFiles };
+}
+
+function extractDocxOutline(xml: string, fileName: string) {
+  const warnings: string[] = [];
+  const nodes: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>> = [];
+  const baseNow = new Date().toISOString();
+  const documentId = stableNodeId('docx', fileName, 'document', 0, fileName);
+  nodes.push({
+    id: documentId,
+    parentNodeId: null,
+    nodeType: 'document',
+    title: fileName,
+    content: null,
+    sourcePath: fileName,
+    sourceStart: 'paragraph:0',
+    sourceEnd: 'paragraph:0',
+    provenanceKind: 'docx',
+    provenanceJson: JSON.stringify({ kind: 'docx', filePath: fileName, anchor: 'word/document.xml' }),
+    createdAt: baseNow,
+    updatedAt: baseNow,
+  });
+
+  const paragraphs = [...xml.matchAll(/<w:p(?:[^>]*)>([\s\S]*?)<\/w:p>/g)];
+  const stack: Array<{ level: number; id: string }> = [{ level: 0, id: documentId }];
+  const items: string[] = ['word/document.xml'];
+
+  paragraphs.forEach((match, idx) => {
+    const paragraphXml = match[1] ?? '';
+    const styleMatch = paragraphXml.match(/Heading([1-6])/i);
+    const text = [...paragraphXml.matchAll(/<w:t[^>]*>([\s\S]*?)<\/w:t>/g)].map((m) => decodeXml(m[1] ?? '')).join('').trim();
+    if (!text) {
+      return;
+    }
+    if (!styleMatch) {
+      return;
+    }
+    const level = Number(styleMatch[1]);
+    while (stack.length > 0 && stack[stack.length - 1]!.level >= level) {
+      stack.pop();
+    }
+    const parentId = stack[stack.length - 1]?.id ?? documentId;
+    const nodeType = level === 1 ? 'chapter' : level === 2 ? 'section' : 'subsection';
+    const id = stableNodeId('docx', fileName, nodeType, idx + 1, text);
+    nodes.push({
+      id,
+      parentNodeId: parentId,
+      nodeType,
+      title: text,
+      content: null,
+      sourcePath: fileName,
+      sourceStart: `paragraph:${idx + 1}`,
+      sourceEnd: `paragraph:${idx + 1}`,
+      provenanceKind: 'docx',
+      provenanceJson: JSON.stringify({ kind: 'docx', filePath: fileName, paragraph: idx + 1, style: `Heading${level}` }),
+      createdAt: baseNow,
+      updatedAt: baseNow,
+    });
+    stack.push({ level, id });
+    items.push(`${nodeType}:${text}`);
+  });
+
+  if (nodes.length === 1) {
+    warnings.push('DOCX heading extraction degraded because no explicit Heading styles were found.');
+    nodes[0] = {
+      ...nodes[0],
+      provenanceKind: 'unavailable',
+      provenanceJson: JSON.stringify({ kind: 'unavailable', reason: 'No explicit DOCX heading styles were found.' }),
+    };
+  }
+
+  return { warnings, nodes, items };
+}
+
+function extractPdfOutline(text: string, fileName: string) {
+  const warnings: string[] = [];
+  const nodes: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>> = [];
+  const baseNow = new Date().toISOString();
+  const documentId = stableNodeId('pdf', fileName, 'document', 0, fileName);
+  nodes.push({
+    id: documentId,
+    parentNodeId: null,
+    nodeType: 'document',
+    title: fileName,
+    content: null,
+    sourcePath: fileName,
+    sourceStart: 'page:1',
+    sourceEnd: 'page:1',
+    provenanceKind: 'pdf',
+    provenanceJson: JSON.stringify({ kind: 'pdf', filePath: fileName, page: 1 }),
+    createdAt: baseNow,
+    updatedAt: baseNow,
+  });
+
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const candidateLines = lines.filter((line) => /^[A-ZÁÉÍÓÚÑ0-9 .:-]{4,}$/.test(line));
+
+  if (candidateLines.length === 0) {
+    warnings.push('PDF outline extraction degraded because no reliable heading candidates were found.');
+    nodes[0] = {
+      ...nodes[0],
+      provenanceKind: 'unavailable',
+      provenanceJson: JSON.stringify({ kind: 'unavailable', reason: 'No reliable PDF heading candidates were found.' }),
+    };
+    return { warnings, nodes };
+  }
+
+  candidateLines.slice(0, 6).forEach((line, idx) => {
+    const nodeType = idx === 0 ? 'chapter' : 'section';
+    nodes.push({
+      id: stableNodeId('pdf', fileName, nodeType, idx + 1, line),
+      parentNodeId: idx === 0 ? documentId : nodes[1]?.id ?? documentId,
+      nodeType,
+      title: line,
+      content: null,
+      sourcePath: fileName,
+      sourceStart: `page:${idx + 1}`,
+      sourceEnd: `page:${idx + 1}`,
+      provenanceKind: 'pdf',
+      provenanceJson: JSON.stringify({ kind: 'pdf', filePath: fileName, page: idx + 1 }),
+      createdAt: baseNow,
+      updatedAt: baseNow,
+    });
+  });
+
+  return { warnings, nodes };
+}
+
+function stableNodeId(format: string, sourcePath: string, nodeType: string, anchor: number, title: string) {
+  return `${format}:${sourcePath}:${nodeType}:${anchor}:${slugify(title).slice(0, 48)}`;
+}
+
+function collectTexFiles(rootDir: string) {
+  const found: string[] = [];
+  const visit = (directory: string) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolutePath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(absolutePath);
+        continue;
+      }
+      if (entry.isFile() && entry.name.toLowerCase().endsWith('.tex')) {
+        found.push(path.relative(rootDir, absolutePath));
+      }
+    }
+  };
+
+  visit(rootDir);
+  return found.sort();
+}
+
+function decodeXml(value: string) {
+  return value
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'");
 }

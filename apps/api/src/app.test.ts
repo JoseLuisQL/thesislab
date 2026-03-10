@@ -704,16 +704,36 @@ describe('thesis lifecycle registry routes', () => {
     const latexDir = path.join(fixtureRoot, 'latex-project');
     fs.mkdirSync(latexDir, { recursive: true });
     fs.writeFileSync(
+      path.join(latexDir, 'chapter1.tex'),
+      '\\chapter{Introduccion}\n\\section{Marco teorico}\nTexto base.\n\\input{sections/methodology}\n',
+      'utf8',
+    );
+    fs.mkdirSync(path.join(latexDir, 'sections'), { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'sections', 'methodology.tex'),
+      '\\section{Metodologia}\n\\subsection{Datos}\nDetalle metodologico.\n',
+      'utf8',
+    );
+    fs.writeFileSync(
       path.join(latexDir, 'main.tex'),
-      '\\documentclass{report}\n\\begin{document}\n\\chapter{Introduccion}\nHola.\n\\end{document}\n',
+      '\\documentclass{report}\n\\begin{document}\n\\input{chapter1}\n\\end{document}\n',
       'utf8',
     );
 
     const docxPath = path.join(fixtureRoot, 'outline.docx');
-    fs.writeFileSync(docxPath, Buffer.from('PK\u0003\u0004word/document.xml', 'utf8'));
+    fs.writeFileSync(
+      docxPath,
+      Buffer.from(
+        'PK\u0003\u0004word/document.xml<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Introducción</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Marco teórico</w:t></w:r></w:p>',
+        'utf8',
+      ),
+    );
 
     const pdfPath = path.join(fixtureRoot, 'outline.pdf');
-    fs.writeFileSync(pdfPath, Buffer.from('%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF', 'utf8'));
+    fs.writeFileSync(
+      pdfPath,
+      Buffer.from('%PDF-1.4\nINTRODUCCION\nMARCO TEORICO\nRESULTADOS\n%%EOF', 'utf8'),
+    );
 
     const createResponse = await app.inject({
       method: 'POST',
@@ -757,7 +777,12 @@ describe('thesis lifecycle registry routes', () => {
         id: string;
         sourceFormat: string;
         detection: { format: string; matchedBy: string };
-        report: { detectedFormat: string; terminalStatus: string; structureSummary: { entrypoint: string | null; items: string[] } | null };
+        report: {
+          detectedFormat: string;
+          terminalStatus: string;
+          structureSummary: { entrypoint: string | null; items: string[] } | null;
+          normalizationSummary: { nodeCount: number; provenanceCoverage: { available: number; unavailable: number } } | null;
+        };
       };
     };
     const docxJob = docxResponse.json() as {
@@ -765,7 +790,13 @@ describe('thesis lifecycle registry routes', () => {
         id: string;
         sourceFormat: string;
         detection: { format: string; matchedBy: string };
-        report: { detectedFormat: string; terminalStatus: string; structureSummary: { entrypoint: string | null } | null };
+        report: {
+          detectedFormat: string;
+          terminalStatus: string;
+          structureSummary: { entrypoint: string | null; items: string[] } | null;
+          normalizationSummary: { nodeCount: number; provenanceCoverage: { available: number; unavailable: number } } | null;
+          warnings: string[];
+        };
       };
     };
     const pdfJob = pdfResponse.json() as {
@@ -773,7 +804,12 @@ describe('thesis lifecycle registry routes', () => {
         id: string;
         sourceFormat: string;
         detection: { format: string; matchedBy: string };
-        report: { detectedFormat: string; terminalStatus: string; warnings: string[] };
+        report: {
+          detectedFormat: string;
+          terminalStatus: string;
+          warnings: string[];
+          normalizationSummary: { nodeCount: number; provenanceCoverage: { available: number; unavailable: number } } | null;
+        };
       };
     };
 
@@ -784,7 +820,10 @@ describe('thesis lifecycle registry routes', () => {
       terminalStatus: 'succeeded',
       structureSummary: {
         entrypoint: 'main.tex',
-        items: ['main.tex'],
+        items: ['chapter1.tex', 'main.tex', 'sections/methodology.tex'],
+      },
+      normalizationSummary: {
+        nodeCount: 5,
       },
     });
 
@@ -795,6 +834,11 @@ describe('thesis lifecycle registry routes', () => {
       terminalStatus: 'succeeded',
       structureSummary: {
         entrypoint: 'word/document.xml',
+        items: ['word/document.xml', 'chapter:Introducción', 'section:Marco teórico'],
+      },
+      normalizationSummary: {
+        nodeCount: 3,
+        provenanceCoverage: { available: 3, unavailable: 0 },
       },
     });
 
@@ -802,9 +846,10 @@ describe('thesis lifecycle registry routes', () => {
     expect(pdfJob.intakeJob.detection).toMatchObject({ format: 'pdf', matchedBy: 'extension:.pdf' });
     expect(pdfJob.intakeJob.report.detectedFormat).toBe('pdf');
     expect(pdfJob.intakeJob.report.terminalStatus).toBe('succeeded');
-    expect(pdfJob.intakeJob.report.warnings).toContain(
-      'PDF outline extraction is currently limited to container validation in this milestone.',
-    );
+    expect(pdfJob.intakeJob.report.normalizationSummary).toMatchObject({
+      nodeCount: 4,
+      provenanceCoverage: { available: 4, unavailable: 0 },
+    });
 
     const statusResponse = await app.inject({
       method: 'GET',
@@ -819,6 +864,164 @@ describe('thesis lifecycle registry routes', () => {
     expect(reportResponse.statusCode).toBe(200);
     expect((statusResponse.json() as { intakeJob: { status: string } }).intakeJob.status).toBe('succeeded');
     expect((reportResponse.json() as { report: { terminalStatus: string } }).report.terminalStatus).toBe('succeeded');
+
+    const nodesResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/intake-jobs/${latexJob.intakeJob.id}/nodes`,
+    });
+
+    expect(nodesResponse.statusCode).toBe(200);
+    const nodesPayload = nodesResponse.json() as {
+      nodes: Array<{
+        id: string;
+        nodeType: string;
+        title: string | null;
+        parentNodeId: string | null;
+        ordinal: number;
+        provenanceKind: string;
+        provenance: Record<string, unknown> | null;
+      }>;
+    };
+
+    expect(nodesPayload.nodes.map((node) => node.id)).toEqual([
+      'latex:main.tex:document:0:document',
+      'latex:chapter1.tex:chapter:1:introduccion',
+      'latex:chapter1.tex:section:2:marco-teorico',
+      'latex:sections/methodology.tex:section:1:metodologia',
+      'latex:sections/methodology.tex:subsection:2:datos',
+    ]);
+    expect(nodesPayload.nodes.map((node) => node.ordinal)).toEqual([1, 2, 3, 4, 5]);
+    expect(nodesPayload.nodes[1]).toMatchObject({
+      nodeType: 'chapter',
+      title: 'Introduccion',
+      parentNodeId: 'latex:main.tex:document:0:document',
+      provenanceKind: 'latex',
+      provenance: { kind: 'latex', filePath: 'chapter1.tex', lineStart: 1, lineEnd: 1 },
+    });
+
+    const nodesRepeatResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/intake-jobs/${latexJob.intakeJob.id}/nodes`,
+    });
+
+    expect((nodesRepeatResponse.json() as { nodes: Array<{ id: string }> }).nodes.map((node) => node.id)).toEqual(
+      nodesPayload.nodes.map((node) => node.id),
+    );
+  });
+
+  it('extracts degraded DOCX and PDF outlines with explicit provenance-unavailable warnings when semantics are weak', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-degraded-'));
+    const docxPath = path.join(fixtureRoot, 'degraded.docx');
+    fs.writeFileSync(docxPath, Buffer.from('PK\u0003\u0004word/document.xml<w:p><w:r><w:t>Solo texto plano</w:t></w:r></w:p>', 'utf8'));
+
+    const pdfPath = path.join(fixtureRoot, 'degraded.pdf');
+    fs.writeFileSync(pdfPath, Buffer.from('%PDF-1.4\ntexto sin encabezados claros\n%%EOF', 'utf8'));
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis intake degradada',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const docxResponse = await app.inject({ method: 'POST', url: `/theses/${thesisId}/intake-jobs`, payload: { importRootPath: docxPath } });
+    const pdfResponse = await app.inject({ method: 'POST', url: `/theses/${thesisId}/intake-jobs`, payload: { importRootPath: pdfPath } });
+
+    expect(docxResponse.statusCode).toBe(201);
+    expect(pdfResponse.statusCode).toBe(201);
+
+    const docxJob = docxResponse.json() as { intakeJob: { id: string; report: { warnings: string[]; normalizationSummary: { provenanceCoverage: { unavailable: number } } | null } } };
+    const pdfJob = pdfResponse.json() as { intakeJob: { id: string; report: { warnings: string[]; normalizationSummary: { provenanceCoverage: { unavailable: number } } | null } } };
+
+    expect(docxJob.intakeJob.report.warnings).toContain('DOCX heading extraction degraded because no explicit Heading styles were found.');
+    expect(docxJob.intakeJob.report.normalizationSummary?.provenanceCoverage.unavailable).toBe(1);
+    expect(pdfJob.intakeJob.report.warnings).toContain('PDF outline extraction degraded because no reliable heading candidates were found.');
+    expect(pdfJob.intakeJob.report.normalizationSummary?.provenanceCoverage.unavailable).toBe(1);
+
+    const docxNodes = await app.inject({ method: 'GET', url: `/theses/${thesisId}/intake-jobs/${docxJob.intakeJob.id}/nodes` });
+    const pdfNodes = await app.inject({ method: 'GET', url: `/theses/${thesisId}/intake-jobs/${pdfJob.intakeJob.id}/nodes` });
+
+    expect((docxNodes.json() as { nodes: Array<{ provenanceKind: string }> }).nodes).toEqual([
+      expect.objectContaining({ provenanceKind: 'unavailable' }),
+    ]);
+    expect((pdfNodes.json() as { nodes: Array<{ provenanceKind: string }> }).nodes).toEqual([
+      expect.objectContaining({ provenanceKind: 'unavailable' }),
+    ]);
+  });
+
+  it('blocks LaTeX intake that escapes the thesis workspace boundary through include roots or symlinks', async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-boundary-'));
+    const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-external-'));
+    const escapedProject = path.join(workspaceRoot, 'escaped-project');
+    const linkedProject = path.join(workspaceRoot, 'linked-project');
+    fs.mkdirSync(escapedProject, { recursive: true });
+    fs.mkdirSync(linkedProject, { recursive: true });
+    fs.writeFileSync(path.join(externalRoot, 'outside.tex'), '\\section{Fuera}\n', 'utf8');
+    fs.writeFileSync(
+      path.join(escapedProject, 'main.tex'),
+      `\\documentclass{report}\n\\begin{document}\n\\input{${path.relative(escapedProject, path.join(externalRoot, 'outside.tex')).replace(/\\/g, '/').replace(/\.tex$/, '')}}\n\\end{document}\n`,
+      'utf8',
+    );
+    fs.symlinkSync(externalRoot, path.join(linkedProject, 'shared'));
+    fs.writeFileSync(
+      path.join(linkedProject, 'main.tex'),
+      '\\documentclass{report}\n\\begin{document}\n\\input{shared/outside}\n\\end{document}\n',
+      'utf8',
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis boundary',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: workspaceRoot,
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const escapedResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: escapedProject },
+    });
+    const linkedResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: linkedProject },
+    });
+
+    expect(escapedResponse.statusCode).toBe(201);
+    expect(linkedResponse.statusCode).toBe(201);
+
+    const escapedJob = escapedResponse.json() as { intakeJob: { status: string; report: { failures: Array<{ code: string }> } } };
+    const linkedJob = linkedResponse.json() as { intakeJob: { status: string; report: { failures: Array<{ code: string }> } } };
+
+    expect(escapedJob.intakeJob.status).toBe('failed');
+    expect(linkedJob.intakeJob.status).toBe('failed');
+    expect(escapedJob.intakeJob.report.failures).toContainEqual(expect.objectContaining({ code: 'LATEX_INCLUDE_OUTSIDE_BOUNDARY' }));
+    expect(linkedJob.intakeJob.report.failures).toContainEqual(expect.objectContaining({ code: 'LATEX_INCLUDE_OUTSIDE_BOUNDARY' }));
+
+    const outsidePathResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: externalRoot },
+    });
+
+    expect(outsidePathResponse.statusCode).toBe(400);
+    expect(outsidePathResponse.json()).toEqual(expect.objectContaining({
+      ok: false,
+      code: 'INTAKE_BOUNDARY_VIOLATION',
+      thesisId,
+    }));
   });
 
   it('fails unsupported or corrupt imports explicitly without persisting a fake successful model', async () => {
