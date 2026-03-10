@@ -21,54 +21,45 @@
   },
   "reviewsSummary": {
     "total": 4,
-    "passed": 0,
-    "failed": 4,
+    "passed": 2,
+    "failed": 2,
     "failedFeatures": [
-      "platform-monorepo-scaffold",
       "platform-docker-toolchain-services",
-      "db-schema-domain-core",
-      "db-repository-boundaries-core"
+      "db-schema-domain-core"
     ]
   },
   "blockingIssues": [
     {
-      "featureId": "platform-monorepo-scaffold",
+      "featureId": "platform-docker-toolchain-services",
       "severity": "blocking",
-      "description": "apps/api/src/server.ts binds to `process.env.PORT ?? 3100` instead of the mission contract variable `PORT_API`, so the scaffolded API runtime is not aligned with `.factory/init.sh` and `.factory/library/environment.md`."
+      "description": "apps/web/src/App.test.tsx still asserts the original baseline shell copy instead of the current validator-facing dashboard behavior, so the feature's web smoke coverage is stale against the actual scaffold."
     },
     {
       "featureId": "platform-docker-toolchain-services",
       "severity": "blocking",
-      "description": "The referenced completion commit `78b26fd` only adds smoke tests and does not implement the Docker-first execution path, service scripts, environment defaults, or validation harness wiring described by the feature; the actual tooling work appears to predate the assigned feature commit."
+      "description": "packages/shared/src/platform.test.ts still checks obsolete webShellCards titles that the current web surface no longer consumes, leaving the promised smoke-validation traceability out of date."
     },
     {
       "featureId": "db-schema-domain-core",
       "severity": "blocking",
-      "description": "packages/db schema and migration files leave several declared entity relationships as plain text columns without SQLite foreign-key enforcement, so downstream features can create orphaned or cross-entity records despite the schema implying durable relational integrity."
+      "description": "packages/db/drizzle/0000_domain_core.sql omits foreign-key constraints for reference fields such as activeImportId, activeBuildRunId, activeCheckpointId, and currentStepId even though the schema models them as durable relationships."
     },
     {
-      "featureId": "db-repository-boundaries-core",
+      "featureId": "db-schema-domain-core",
       "severity": "blocking",
-      "description": "packages/db persistence-contract tests only prove thesis scoping and deterministic ordering for a narrow subset of repositories, leaving most thesis-domain repository boundaries unverified despite the feature claiming package-level tests as the downstream contract."
+      "description": "The base db migration also omits several nullable relation foreign keys (including normalized node, claim, and Zotero source links), so fresh databases created from the base migration can persist orphaned references contrary to the feature contract."
     }
   ],
   "appliedUpdates": [],
-  "suggestedGuidanceUpdates": [
-    {
-      "target": "AGENTS.md",
-      "suggestion": "Clarify how platform features should map completion status to commits or worker sessions so scrutiny can trace feature ownership when implementation lands earlier than follow-up coverage commits.",
-      "evidence": "`platform-docker-toolchain-services` is marked completed by session `9fb04b7e-2a8d-4081-afcc-a6a4bdd29169`, but the referenced commit `78b26fd` only adds smoke tests while the platform scripts and services were introduced in scaffold commit `25e077d`.",
-      "isSystemic": false
-    }
-  ],
+  "suggestedGuidanceUpdates": [],
   "rejectedObservations": [
     {
-      "observation": "Runtime entrypoints should consume the same env var names established by `.factory/init.sh` and `.factory/library/environment.md`.",
-      "reason": "already-documented: `.factory/library/environment.md` already records `PORT_API` and `PORT_WEB`; the review surfaced an implementation bug rather than missing shared-state documentation."
+      "observation": "Document which UI/API strings are intended to remain stable validator contracts versus feature copy that can evolve.",
+      "reason": "ambiguous: the review evidence identifies a useful distinction, but the exact durable contract should be decided by the orchestrator rather than recorded as factual library guidance without a repo-wide policy."
     },
     {
-      "observation": "The repo has no top-level README.md, so worker guidance should point to mission docs or `.factory/library/*` as the actual exploration entrypoint.",
-      "reason": "ambiguous: this comes from global exec guidance rather than milestone-specific shared state, so it should be handled outside this scrutiny synthesis."
+      "observation": "Add worker guidance requiring parity checks between Drizzle schema references and generated SQL migrations after generation.",
+      "reason": "recommend-to-orchestrator instead: this is a procedural skill/AGENTS.md change rather than a factual services or library update that scrutiny should apply directly."
     }
   ],
   "previousRound": null

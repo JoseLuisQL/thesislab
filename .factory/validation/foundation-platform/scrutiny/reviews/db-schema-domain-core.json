@@ -1,34 +1,34 @@
 {
   "featureId": "db-schema-domain-core",
-  "reviewedAt": "2026-03-09T18:25:00Z",
+  "reviewedAt": "2026-03-10T07:51:05.039480Z",
   "commitId": "80f7948",
   "transcriptSkeletonReviewed": true,
   "diffReviewed": true,
   "status": "fail",
   "codeReview": {
-    "summary": "The feature establishes broad DB package scaffolding, migration wiring, and tests, but the schema/migration foundation is not yet reliable enough for downstream repository work because several declared relations are not backed by foreign-key constraints in the actual tables, and the current tests do not catch those integrity gaps.",
+    "summary": "The feature established the db package, schema, migration runner, and tests, but the committed base migration omitted multiple declared foreign keys, leaving fresh databases without the relational integrity promised by the schema definitions and expected behavior.",
     "issues": [
       {
         "file": "packages/db/src/schema.ts",
-        "line": 49,
+        "line": 27,
         "severity": "blocking",
-        "description": "Several ID fields that represent entity relationships are declared as plain text columns instead of foreign keys (for example `workflow_tasks.parent_task_id`, `workflow_tasks.active_checkpoint_id`, `workflow_packs.current_step_id`, `normalized_nodes.parent_node_id`, `evidence_fragments.normalized_node_id`, `evidence_fragments.task_id`, `claims.normalized_node_id`, `zotero_mappings.normalized_node_id`, `zotero_mappings.source_id`, `compliance_issues.normalized_node_id`, `academic_qa_issues.claim_id`, `academic_qa_issues.normalized_node_id`, and `build_runs.checkpoint_id`). Downstream features depend on durable schema relationships, but these references are not enforced in SQLite or the generated migration, so orphaned or cross-entity records can be inserted despite the Drizzle relations API implying integrity."
+        "description": "The schema declares reference-like fields such as `activeImportId`, `activeBuildRunId`, `activeCheckpointId`, and `currentStepId`, but the committed base migration `packages/db/drizzle/0000_domain_core.sql` creates those columns without any foreign-key constraints. Fresh databases migrated from 0000 therefore do not enforce the durable relationships implied by the schema/contracts for active import/build/checkpoint/current-step links."
       },
       {
-        "file": "packages/db/src/schema.test.ts",
-        "line": 11,
-        "severity": "non_blocking",
-        "description": "The package-level schema tests only assert table existence and a couple of successful inserts, so they would not detect missing foreign-key constraints or other relational-integrity regressions in the generated migration. This left the blocking schema issue above unverified even though the feature claims a verified migration foundation."
+        "file": "packages/db/src/schema.ts",
+        "line": 166,
+        "severity": "blocking",
+        "description": "Several nullable relation fields are modeled with foreign keys in the Drizzle schema (`evidence_fragments.normalizedNodeId`, `claims.normalizedNodeId`, `compliance_issues.normalizedNodeId`, `academic_qa_issues.claimId`, `academic_qa_issues.normalizedNodeId`, `zotero_mappings.normalizedNodeId`, `zotero_mappings.sourceId`), but `packages/db/drizzle/0000_domain_core.sql` omits those constraints. The follow-up migrations 0001/0002 add some of them later, and `schema.test.ts` validates those later files instead of the declared base migration, so a clean setup at this feature commit can persist orphaned references contrary to the expected durable schema foundation."
       }
     ]
   },
   "sharedStateObservations": [
     {
       "area": "knowledge",
-      "observation": "The repo has no top-level README.md, yet the worker transcript includes an attempted `Read` of `/root/thesislab/README.md` because global exec guidance says to start exploration there. The project guidance should document the actual equivalent entrypoint (for example mission docs plus `.factory/library/*`) to avoid repeated dead-end lookups.",
-      "evidence": "Transcript skeleton for worker session 01b58e68-55eb-4308-84ba-92c58482500b shows a `Read` call for `/root/thesislab/README.md`, and the reviewer's read of that path returned ENOENT."
+      "observation": "The db foundation feature discovered that generated Drizzle migrations can lag behind `schema.ts`, but neither AGENTS.md nor the backend-worker skill currently tells workers/reviewers to compare committed SQL artifacts against the declared schema references after generation.",
+      "evidence": "This feature's schema declares more references than `packages/db/drizzle/0000_domain_core.sql` actually enforces, and the transcript shows the worker only inspected the migration artifact manually after validation rather than checking parity between schema definitions and SQL output."
     }
   ],
   "addressesFailureFrom": null,
-  "summary": "Reviewed handoff, transcript skeleton, backend-worker skill, shared-state docs, and commit `80f7948`. The feature added substantial `packages/db` groundwork, but it should fail scrutiny because multiple schema relations are modeled only at the TypeScript/Drizzle relation layer and are not enforced by foreign keys in the generated SQLite schema, leaving the migration foundation insufficiently durable for downstream repository features."
+  "summary": "Review failed. The db package wiring and tests landed, but the base migration committed for db-schema-domain-core does not fully match the Drizzle schema: several foreign keys are missing in 0000, and the strongest relational-integrity test only passes by applying later migrations that were not part of this feature commit."
 }
