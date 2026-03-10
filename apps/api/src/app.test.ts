@@ -1009,6 +1009,63 @@ describe('thesis lifecycle registry routes', () => {
     });
   });
 
+  it('accepts host-style repo-root tmp fixture paths when the service cwd is nested below the mounted repo root', async () => {
+    const hostRepoRoot = '/root/thesislab';
+    const mountedWorkspaceRoot = process.cwd();
+    const relativeFixtureDir = path.join('tmp', 'hostpath-manual-check', 'latex-project');
+    const latexDir = path.join(mountedWorkspaceRoot, relativeFixtureDir);
+    fs.mkdirSync(latexDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'main.tex'),
+      '\\documentclass{report}\n\\begin{document}\n\\chapter{Importacion host nested}\n\\section{Ruta tmp}\n\\end{document}\n',
+      'utf8',
+    );
+
+    vi.stubEnv('HOST_REPO_ROOT', hostRepoRoot);
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis ruta host nested',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: hostRepoRoot,
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: {
+        importRootPath: path.join(hostRepoRoot, relativeFixtureDir),
+      },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const intakePayload = intakeResponse.json() as {
+      intakeJob: {
+        status: string;
+        importRootPath: string;
+        report: {
+          terminalStatus: string;
+          failures: Array<{ code: string }>;
+        } | null;
+      };
+    };
+
+    expect(intakePayload.intakeJob.status).toBe('succeeded');
+    expect(intakePayload.intakeJob.importRootPath).toBe(latexDir);
+    expect(intakePayload.intakeJob.report).toMatchObject({
+      terminalStatus: 'succeeded',
+      failures: [],
+    });
+  });
+
   it('keeps repeated re-imports recoverable and exposes forward/backward lineage on active and superseded imports', async () => {
     const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-reimport-'));
     const latexDir = path.join(fixtureRoot, 'latex-project');

@@ -1272,11 +1272,18 @@ function resolveBoundaryRoot(workspacePath: string, importRootPath: string) {
 function mapWorkspacePathToMountedRoot(workspacePath: string) {
   const cwd = path.resolve(process.cwd());
   const mountedRoot = fs.realpathSync.native(cwd);
+  const mountedRootSegments = splitPathSegments(mountedRoot);
   const workspaceSegments = splitPathSegments(path.resolve(workspacePath));
-  const workspaceMatch = findRepoNameMatch(workspaceSegments, splitPathSegments(mountedRoot).at(-1));
+  const workspaceMatch = findRepoNameMatch(workspaceSegments, mountedRootSegments.at(-1));
 
   if (workspaceMatch) {
     return path.join(mountedRoot, ...workspaceMatch.suffixSegments);
+  }
+
+  const cwdMatch = findCommonSuffixMatch(workspaceSegments, mountedRootSegments);
+
+  if (cwdMatch) {
+    return path.join(mountedRoot, ...cwdMatch.suffixSegments);
   }
 
   const configuredRepoRoot = process.env.HOST_REPO_ROOT?.trim();
@@ -1310,6 +1317,31 @@ function findRepoNameMatch(workspaceSegments: string[], repoName: string | undef
   return {
     suffixSegments: workspaceSegments.slice(repoMatchIndex + 1),
   };
+}
+
+function findCommonSuffixMatch(workspaceSegments: string[], mountedRootSegments: string[]) {
+  const maxCandidateLength = Math.min(workspaceSegments.length, mountedRootSegments.length - 1);
+
+  for (let candidateLength = maxCandidateLength; candidateLength >= 1; candidateLength -= 1) {
+    const workspaceStart = workspaceSegments.length - candidateLength;
+    const mountedStart = mountedRootSegments.length - candidateLength;
+    let matches = true;
+
+    for (let index = 0; index < candidateLength; index += 1) {
+      if (workspaceSegments[workspaceStart + index] !== mountedRootSegments[mountedStart + index]) {
+        matches = false;
+        break;
+      }
+    }
+
+    if (matches) {
+      return {
+        suffixSegments: workspaceSegments.slice(workspaceStart + candidateLength),
+      };
+    }
+  }
+
+  return null;
 }
 
 function resolveImportRootPath(boundaryRoot: string, importRootPath: string) {
