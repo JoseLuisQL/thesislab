@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -257,6 +258,120 @@ describe('GET /status/capabilities', () => {
 });
 
 describe('thesis lifecycle registry routes', () => {
+  const createZipArchive = (entries: Record<string, string>) => {
+    const localFileRecords: Buffer[] = [];
+    const centralDirectoryRecords: Buffer[] = [];
+    let offset = 0;
+
+    for (const [name, content] of Object.entries(entries)) {
+      const fileNameBuffer = Buffer.from(name, 'utf8');
+      const uncompressed = Buffer.from(content, 'utf8');
+      const compressed = zlib.deflateRawSync(uncompressed);
+
+      const localHeader = Buffer.alloc(30);
+      localHeader.writeUInt32LE(0x04034b50, 0);
+      localHeader.writeUInt16LE(20, 4);
+      localHeader.writeUInt16LE(0, 6);
+      localHeader.writeUInt16LE(8, 8);
+      localHeader.writeUInt16LE(0, 10);
+      localHeader.writeUInt16LE(0, 12);
+      localHeader.writeUInt32LE(0, 14);
+      localHeader.writeUInt32LE(compressed.length, 18);
+      localHeader.writeUInt32LE(uncompressed.length, 22);
+      localHeader.writeUInt16LE(fileNameBuffer.length, 26);
+      localHeader.writeUInt16LE(0, 28);
+
+      const localRecord = Buffer.concat([localHeader, fileNameBuffer, compressed]);
+      localFileRecords.push(localRecord);
+
+      const centralHeader = Buffer.alloc(46);
+      centralHeader.writeUInt32LE(0x02014b50, 0);
+      centralHeader.writeUInt16LE(20, 4);
+      centralHeader.writeUInt16LE(20, 6);
+      centralHeader.writeUInt16LE(0, 8);
+      centralHeader.writeUInt16LE(8, 10);
+      centralHeader.writeUInt16LE(0, 12);
+      centralHeader.writeUInt16LE(0, 14);
+      centralHeader.writeUInt32LE(0, 16);
+      centralHeader.writeUInt32LE(compressed.length, 20);
+      centralHeader.writeUInt32LE(uncompressed.length, 24);
+      centralHeader.writeUInt16LE(fileNameBuffer.length, 28);
+      centralHeader.writeUInt16LE(0, 30);
+      centralHeader.writeUInt16LE(0, 32);
+      centralHeader.writeUInt16LE(0, 34);
+      centralHeader.writeUInt16LE(0, 36);
+      centralHeader.writeUInt32LE(0, 38);
+      centralHeader.writeUInt32LE(offset, 42);
+
+      const centralRecord = Buffer.concat([centralHeader, fileNameBuffer]);
+      centralDirectoryRecords.push(centralRecord);
+      offset += localRecord.length;
+    }
+
+    const centralDirectory = Buffer.concat(centralDirectoryRecords);
+    const endRecord = Buffer.alloc(22);
+    endRecord.writeUInt32LE(0x06054b50, 0);
+    endRecord.writeUInt16LE(0, 4);
+    endRecord.writeUInt16LE(0, 6);
+    endRecord.writeUInt16LE(centralDirectoryRecords.length, 8);
+    endRecord.writeUInt16LE(centralDirectoryRecords.length, 10);
+    endRecord.writeUInt32LE(centralDirectory.length, 12);
+    endRecord.writeUInt32LE(offset, 16);
+    endRecord.writeUInt16LE(0, 20);
+
+    return Buffer.concat([...localFileRecords, centralDirectory, endRecord]);
+  };
+
+  const createPdfWithOutline = (titles: Array<{ level: number; title: string }>) => {
+    const childrenByParent = new Map<number, number[]>();
+    const ids = titles.map((_, index) => 5 + index);
+    const parentStack: number[] = [3];
+
+    titles.forEach((entry, index) => {
+      while (parentStack.length > entry.level) {
+        parentStack.pop();
+      }
+      const parentId = parentStack[parentStack.length - 1] ?? 3;
+      const objectId = ids[index]!;
+      const siblings = childrenByParent.get(parentId) ?? [];
+      siblings.push(objectId);
+      childrenByParent.set(parentId, siblings);
+      parentStack[entry.level] = objectId;
+    });
+
+    const objects = new Map<number, string>();
+    objects.set(1, '<< /Type /Catalog /Pages 2 0 R /Outlines 3 0 R >>');
+    objects.set(2, '<< /Type /Pages /Count 1 /Kids [4 0 R] >>');
+    objects.set(4, '<< /Type /Page /Parent 2 0 R >>');
+
+    const rootChildren = childrenByParent.get(3) ?? [];
+    const rootFirst = rootChildren[0];
+    const rootLast = rootChildren[rootChildren.length - 1];
+    objects.set(3, `<< /Type /Outlines${rootFirst ? ` /First ${rootFirst} 0 R /Last ${rootLast} 0 R /Count ${titles.length}` : ''} >>`);
+
+    titles.forEach((entry, index) => {
+      const objectId = ids[index]!;
+      const parentId = [...childrenByParent.entries()].find(([, children]) => children.includes(objectId))?.[0] ?? 3;
+      const siblings = childrenByParent.get(parentId) ?? [];
+      const siblingIndex = siblings.indexOf(objectId);
+      const prevId = siblingIndex > 0 ? siblings[siblingIndex - 1] : null;
+      const nextId = siblingIndex >= 0 && siblingIndex < siblings.length - 1 ? siblings[siblingIndex + 1] : null;
+      const children = childrenByParent.get(objectId) ?? [];
+      const escapedTitle = entry.title.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+      const parts = [`/Title (${escapedTitle})`, `/Parent ${parentId} 0 R`, '/Dest [4 0 R /Fit]'];
+      if (prevId) parts.push(`/Prev ${prevId} 0 R`);
+      if (nextId) parts.push(`/Next ${nextId} 0 R`);
+      if (children.length > 0) {
+        parts.push(`/First ${children[0]} 0 R`, `/Last ${children[children.length - 1]} 0 R`, `/Count ${children.length}`);
+      }
+      objects.set(objectId, `<< ${parts.join(' ')} >>`);
+    });
+
+    const orderedIds = Array.from(objects.keys()).sort((a, b) => a - b);
+    const body = orderedIds.map((id) => `${id} 0 obj\n${objects.get(id)}\nendobj`).join('\n');
+    return Buffer.from(`%PDF-1.4\n${body}\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n`, 'utf8');
+  };
+
   let app: ReturnType<typeof createApp>;
 
   beforeEach(() => {
@@ -1012,18 +1127,29 @@ describe('thesis lifecycle registry routes', () => {
     };
 
     expect(thirdImportPayload.intakeJob.status).toBe('succeeded');
-    expect(thirdImportPayload.intakeJob.report?.replacement).toEqual({
+    expect(thirdImportPayload.intakeJob.report?.replacement).toMatchObject({
       isReimport: true,
       replacesIntakeJobId: secondImportPayload.intakeJob.id,
-      replacedByIntakeJobId: null,
       recoverableCheckpointId: expect.any(String),
       supersedesWorkspace: true,
     });
+    expect(thirdImportPayload.intakeJob.report?.replacement?.replacedByIntakeJobId ?? null).toBeNull();
     expect(thirdImportPayload.intakeJob.report?.warnings.some((warning) => /re-importaci[oó]n|reimport/i.test(warning))).toBe(true);
     expect(thirdImportPayload.intakeJob.report?.recommendedNextSteps).toContainEqual(
       expect.objectContaining({
         code: 'REVIEW_REIMPORT_REPLACEMENT',
         triggeredBy: expect.arrayContaining([`reimport:replaces:${secondImportPayload.intakeJob.id}`]),
+      }),
+    );
+    expect(thirdImportPayload.intakeJob.report?.recommendedNextSteps).toContainEqual(
+      expect.objectContaining({
+        code: 'ACTIVATE_IMPORTED_WORKSPACE',
+        triggeredBy: expect.arrayContaining(['finding:structure:ready', 'finding:normalization:complete']),
+      }),
+    );
+    expect(thirdImportPayload.intakeJob.report?.recommendedNextSteps).not.toContainEqual(
+      expect.objectContaining({
+        code: 'REVIEW_INTAKE_REPORT',
       }),
     );
 
@@ -1193,35 +1319,22 @@ describe('thesis lifecycle registry routes', () => {
     const docxPath = path.join(fixtureRoot, 'outline.docx');
     fs.writeFileSync(
       docxPath,
-      Buffer.from(
-        [
-          'PK\u0003\u0004',
-          '--ENTRY:word/document.xml--',
-          '<w:document>',
-          '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Introducción</w:t></w:r></w:p>',
-          '<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Marco teórico</w:t></w:r></w:p>',
-          '<w:p><w:pPr><w:pStyle w:val="Heading3"/></w:pPr><w:r><w:t>Antecedentes</w:t></w:r></w:p>',
-          '</w:document>',
-          '--ENTRY:word/styles.xml--',
-          '<w:styles><w:style w:styleId="Heading1"/><w:style w:styleId="Heading2"/><w:style w:styleId="Heading3"/></w:styles>',
-        ].join(''),
-        'utf8',
-      ),
+      createZipArchive({
+        '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>',
+        'word/document.xml': '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Introducción</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Marco teórico</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Heading3"/></w:pPr><w:r><w:t>Antecedentes</w:t></w:r></w:p></w:body></w:document>',
+        'word/styles.xml': '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style><w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/></w:style><w:style w:type="paragraph" w:styleId="Heading3"><w:name w:val="heading 3"/></w:style></w:styles>',
+      }),
     );
 
     const pdfPath = path.join(fixtureRoot, 'outline.pdf');
     fs.writeFileSync(
       pdfPath,
-      Buffer.from([
-        '%PDF-1.4',
-        '/Title (Tesis Demo)',
-        '/Outlines',
-        'OUTLINE:1:Introducción',
-        'OUTLINE:2:Marco teórico',
-        'OUTLINE:3:Estado del arte',
-        'OUTLINE:2:Resultados',
-        '%%EOF',
-      ].join('\n'), 'utf8'),
+      createPdfWithOutline([
+        { level: 1, title: 'Introducción' },
+        { level: 2, title: 'Marco teórico' },
+        { level: 3, title: 'Estado del arte' },
+        { level: 2, title: 'Resultados' },
+      ]),
     );
 
     const createResponse = await app.inject({
@@ -1413,7 +1526,10 @@ describe('thesis lifecycle registry routes', () => {
     const docxPath = path.join(fixtureRoot, 'degraded.docx');
     fs.writeFileSync(
       docxPath,
-      Buffer.from('PK\u0003\u0004--ENTRY:word/document.xml--<w:document><w:p><w:r><w:t>Solo texto plano</w:t></w:r></w:p></w:document>', 'utf8'),
+      createZipArchive({
+        '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+        'word/document.xml': '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Solo texto plano</w:t></w:r></w:p></w:body></w:document>',
+      }),
     );
 
     const pdfPath = path.join(fixtureRoot, 'degraded.pdf');

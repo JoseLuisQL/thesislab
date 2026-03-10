@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import zlib from 'node:zlib';
 
 import { asc, desc, eq } from 'drizzle-orm';
 
@@ -1570,13 +1571,7 @@ async function performIntakeInspection(
     };
   }
 
-  if (status === 'succeeded') {
-    recommendations.push({
-      code: 'REVIEW_INTAKE_REPORT',
-      message: 'Review the detected structure and continue with normalization or QA.',
-      triggeredBy: ['terminal:succeeded'],
-    });
-  } else {
+  if (status !== 'succeeded') {
     recommendations.push({
       code: 'FIX_IMPORT_SOURCE',
       message: 'Repair or replace the source input, then retry the import.',
@@ -1854,17 +1849,57 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
 }
 
 function extractDocxDocumentXml(buffer: Buffer) {
-  const content = buffer.toString('utf8');
-  const marker = '--ENTRY:word/document.xml--';
-  const markerIndex = content.indexOf(marker);
+  return readZipEntryText(buffer, 'word/document.xml');
+}
 
-  if (markerIndex === -1) {
-    return null;
+function readZipEntryText(buffer: Buffer, entryName: string) {
+  const localFileHeader = 0x04034b50;
+  let offset = 0;
+
+  while (offset + 30 <= buffer.length) {
+    const signature = buffer.readUInt32LE(offset);
+    if (signature !== localFileHeader) {
+      offset += 1;
+      continue;
+    }
+
+    const compressionMethod = buffer.readUInt16LE(offset + 8);
+    const compressedSize = buffer.readUInt32LE(offset + 18);
+    const fileNameLength = buffer.readUInt16LE(offset + 26);
+    const extraFieldLength = buffer.readUInt16LE(offset + 28);
+    const fileNameStart = offset + 30;
+    const fileNameEnd = fileNameStart + fileNameLength;
+    const dataStart = fileNameEnd + extraFieldLength;
+    const dataEnd = dataStart + compressedSize;
+
+    if (dataEnd > buffer.length) {
+      break;
+    }
+
+    const fileName = buffer.subarray(fileNameStart, fileNameEnd).toString('utf8');
+    if (fileName === entryName) {
+      const entryBuffer = buffer.subarray(dataStart, dataEnd);
+      if (compressionMethod === 0) {
+        return entryBuffer.toString('utf8');
+      }
+      if (compressionMethod === 8) {
+        return inflateZipEntry(entryBuffer)?.toString('utf8') ?? null;
+      }
+      return null;
+    }
+
+    offset = dataEnd;
   }
 
-  const start = markerIndex + marker.length;
-  const nextMarkerIndex = content.indexOf('--ENTRY:', start);
-  return content.slice(start, nextMarkerIndex === -1 ? undefined : nextMarkerIndex);
+  return null;
+}
+
+function inflateZipEntry(buffer: Buffer) {
+  try {
+    return zlib.inflateRawSync(buffer);
+  } catch {
+    return null;
+  }
 }
 
 function findNodeById(nodes: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>>, nodeId: string) {
@@ -1994,10 +2029,7 @@ function extractPdfOutline(text: string, fileName: string) {
     updatedAt: baseNow,
   });
 
-  const outlineEntries = [...text.matchAll(/^OUTLINE:(\d+):(.+)$/gm)].map((match) => ({
-    level: Number(match[1]),
-    title: match[2]!.trim(),
-  })).filter((entry) => entry.title.length > 0);
+  const outlineEntries = extractPdfOutlineEntries(text);
 
   if (outlineEntries.length > 0) {
     const stack: Array<{ level: number; id: string }> = [{ level: 0, id: documentId }];
@@ -2061,6 +2093,72 @@ function extractPdfOutline(text: string, fileName: string) {
   });
 
   return { warnings, nodes };
+}
+
+function extractPdfOutlineEntries(text: string) {
+  const normalized = text.replace(/\r/g, '');
+  const objects = new Map<string, string>();
+  const objectRegex = /(\d+)\s+(\d+)\s+obj([\s\S]*?)endobj/g;
+
+  for (const match of normalized.matchAll(objectRegex)) {
+    objects.set(`${match[1]} ${match[2]}`, match[3] ?? '');
+  }
+
+  const catalogRef = normalized.match(/\/Type\s*\/Catalog[\s\S]*?\/Outlines\s+(\d+\s+\d+)\s+R/);
+  if (!catalogRef) {
+    return [];
+  }
+
+  const outlineRoot = objects.get(catalogRef[1]);
+  if (!outlineRoot) {
+    return [];
+  }
+
+  const firstRef = outlineRoot.match(/\/First\s+(\d+\s+\d+)\s+R/);
+  if (!firstRef) {
+    return [];
+  }
+
+  const results: Array<{ level: number; title: string }> = [];
+  const visit = (ref: string, level: number) => {
+    let currentRef: string | null = ref;
+    const seen = new Set<string>();
+
+    while (currentRef && !seen.has(currentRef)) {
+      seen.add(currentRef);
+      const objectBody = objects.get(currentRef);
+      if (!objectBody) {
+        break;
+      }
+
+      const titleMatch = objectBody.match(/\/Title\s*\(([^)]*)\)/);
+      const title = titleMatch ? decodePdfText(titleMatch[1] ?? '') : '';
+      if (title.trim()) {
+        results.push({ level, title: title.trim() });
+      }
+
+      const childRef = objectBody.match(/\/First\s+(\d+\s+\d+)\s+R/);
+      if (childRef) {
+        visit(childRef[1], Math.min(level + 1, 3));
+      }
+
+      const nextRef = objectBody.match(/\/Next\s+(\d+\s+\d+)\s+R/);
+      currentRef = nextRef ? nextRef[1] : null;
+    }
+  };
+
+  visit(firstRef[1], 1);
+  return results;
+}
+
+function decodePdfText(value: string) {
+  return value
+    .replace(/\\\(/g, '(')
+    .replace(/\\\)/g, ')')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\\\/g, '\\');
 }
 
 function stableNodeId(format: string, sourcePath: string, nodeType: string, anchor: number, title: string, namespace?: string) {
