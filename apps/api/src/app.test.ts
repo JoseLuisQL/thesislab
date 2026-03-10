@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createApp } from './app.js';
 
@@ -69,8 +69,13 @@ describe('API port contract', () => {
 describe('GET /status/capabilities', () => {
   const app = createApp();
 
+  beforeEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   afterAll(async () => {
     await app.close();
+    vi.unstubAllEnvs();
   });
 
   it('returns local-first posture with explicit core workflow capabilities', async () => {
@@ -187,6 +192,34 @@ describe('GET /status/capabilities', () => {
         state: 'degraded',
         summary: 'Connector not fully attached',
         detail: expect.stringContaining('offline'),
+      }),
+    );
+  });
+
+  it('keeps the default mock-mode degradation explicit for validator-facing service checks', async () => {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/status/capabilities',
+      headers: {
+        accept: 'application/json',
+      },
+    });
+
+    expect(response.headers['content-type']).toContain('application/json');
+
+    const payload = response.json() as {
+      integrations: Array<{
+        key: string;
+        summary: string;
+        detail: string;
+      }>;
+    };
+
+    expect(payload.integrations).toContainEqual(
+      expect.objectContaining({
+        key: 'zotero',
+        summary: 'Mock connector only',
+        detail: expect.stringContaining('local workflows remain usable'),
       }),
     );
   });
