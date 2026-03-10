@@ -19,7 +19,11 @@ import {
   workflowTasks,
   zoteroMappings,
 } from '../schema.js';
-import { createDomainRepositories, createDomainRepositoryRegistry } from './domain.js';
+import {
+  createDomainRepositories,
+  createDomainRepositoryRegistry,
+  createPersistenceHelpers,
+} from './domain.js';
 
 function createTempDatabaseUrl() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'thesis-db-repos-'));
@@ -222,6 +226,31 @@ describe('domain repository boundaries', () => {
       createdAt: '2026-03-09T10:00:00.000Z',
       updatedAt: '2026-03-09T10:00:00.000Z',
     });
+
+    connection.sqlite.close();
+  });
+
+  it('re-exports the committed registry helper surface for downstream consumers', async () => {
+    const connection = createDatabaseConnection(databaseUrl);
+    const migrationSql = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../../drizzle/0000_domain_core.sql'),
+      'utf8',
+    );
+    await connection.sqlite.executeMultiple(migrationSql);
+
+    expect(createPersistenceHelpers).toBeTypeOf('function');
+
+    const repositoryFactoryKeys = Object.keys(createDomainRepositories(connection.db)).sort();
+    const registry = createDomainRepositoryRegistry(connection.db);
+
+    expect(Object.keys(registry).sort()).toEqual(['helpers', 'repositories']);
+    expect(Object.keys(registry.repositories).sort()).toEqual(repositoryFactoryKeys);
+    expect(registry.helpers).toEqual({
+      createId: createPersistenceHelpers().createId,
+      now: createPersistenceHelpers().now,
+    });
+    expect(registry.helpers.createId).toBe(createPersistenceHelpers().createId);
+    expect(registry.helpers.now).toBe(createPersistenceHelpers().now);
 
     connection.sqlite.close();
   });

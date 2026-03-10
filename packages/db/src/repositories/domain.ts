@@ -71,6 +71,7 @@ import {
   zoteroMappings,
 } from '../schema.js';
 import { GenericSqliteRepository } from './generic.js';
+export { createEntityId, createPersistenceHelpers, createTimestamp } from './helpers.js';
 import { createPersistenceHelpers } from './helpers.js';
 
 class ThesisSqliteRepository
