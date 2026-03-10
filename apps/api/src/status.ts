@@ -36,7 +36,7 @@ export type LocalFirstStatusPayload = {
   integrations: IntegrationCapability[];
 };
 
-const mission = 'misc-foundation-followup';
+const mission = 'foundation-platform';
 
 export function buildLocalFirstStatusPayload(): LocalFirstStatusPayload {
   const timestamp = new Date().toISOString();
