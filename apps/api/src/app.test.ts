@@ -959,6 +959,7 @@ describe('thesis lifecycle registry routes', () => {
           replacement: {
             isReimport: boolean;
             replacesIntakeJobId: string;
+            replacedByIntakeJobId: string | null;
             recoverableCheckpointId: string;
             supersedesWorkspace: boolean;
           } | null;
@@ -1001,6 +1002,7 @@ describe('thesis lifecycle registry routes', () => {
           replacement: {
             isReimport: boolean;
             replacesIntakeJobId: string;
+            replacedByIntakeJobId: string | null;
             recoverableCheckpointId: string;
             supersedesWorkspace: boolean;
           } | null;
@@ -1013,6 +1015,7 @@ describe('thesis lifecycle registry routes', () => {
     expect(thirdImportPayload.intakeJob.report?.replacement).toEqual({
       isReimport: true,
       replacesIntakeJobId: secondImportPayload.intakeJob.id,
+      replacedByIntakeJobId: null,
       recoverableCheckpointId: expect.any(String),
       supersedesWorkspace: true,
     });
@@ -1142,7 +1145,7 @@ describe('thesis lifecycle registry routes', () => {
     expect(detailPayload.thesis.activeWorkspace).toMatchObject({
       intakeJobId: thirdImportPayload.intakeJob.id,
       replacementOfIntakeJobId: secondImportPayload.intakeJob.id,
-      replacedByIntakeJobId: null,
+      replacedByIntakeJobId: thirdImportPayload.intakeJob.report?.replacement?.replacedByIntakeJobId ?? null,
       recoverableCheckpointId: thirdImportPayload.intakeJob.report?.replacement?.recoverableCheckpointId,
       nodeCount: thirdImportPayload.intakeJob.report?.normalizationSummary?.nodeCount,
     });
@@ -1155,7 +1158,7 @@ describe('thesis lifecycle registry routes', () => {
     expect(resumePayload.resume.activeWorkspace).toMatchObject({
       intakeJobId: thirdImportPayload.intakeJob.id,
       replacementOfIntakeJobId: secondImportPayload.intakeJob.id,
-      replacedByIntakeJobId: null,
+      replacedByIntakeJobId: thirdImportPayload.intakeJob.report?.replacement?.replacedByIntakeJobId ?? null,
       recoverableCheckpointId: thirdImportPayload.intakeJob.report?.replacement?.recoverableCheckpointId,
       nodeCount: thirdImportPayload.intakeJob.report?.normalizationSummary?.nodeCount,
     });

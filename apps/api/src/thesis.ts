@@ -904,7 +904,7 @@ export class ThesisLifecycleService {
       nodeCount: report?.normalizationSummary?.nodeCount ?? 0,
       rootNodeIds: report?.normalizationSummary?.rootNodeIds ?? [],
       replacementOfIntakeJobId: report?.replacement?.replacesIntakeJobId ?? null,
-      replacedByIntakeJobId: null,
+      replacedByIntakeJobId: report?.replacement?.replacedByIntakeJobId ?? null,
       recoverableCheckpointId: report?.replacement?.recoverableCheckpointId ?? null,
     };
   }
