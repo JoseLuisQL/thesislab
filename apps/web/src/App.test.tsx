@@ -116,6 +116,262 @@ const resumePayload = {
   },
 };
 
+const intakeJobPayload = {
+  ok: true,
+  intakeJob: {
+    id: 'intake-alpha',
+    thesisId: 'thesis-alpha',
+    sourceFormat: 'latex',
+    status: 'completed',
+    importRootPath: '/workspace/tesis-alpha',
+    detectedEntrypoint: 'main.tex',
+    detection: {
+      format: 'latex',
+      reason: 'Main LaTeX file detected from reachable root document.',
+      matchedBy: 'entrypoint',
+    },
+    report: {
+      thesisId: 'thesis-alpha',
+      intakeJobId: 'intake-alpha',
+      terminalStatus: 'completed',
+      detectedFormat: 'latex',
+      detection: {
+        format: 'latex',
+        reason: 'Main LaTeX file detected from reachable root document.',
+        matchedBy: 'entrypoint',
+      },
+      extractionStatus: 'completed',
+      normalizationStatus: 'completed',
+      structureSummary: {
+        entrypoint: 'main.tex',
+        itemCount: 3,
+        items: ['Introducción', 'Marco teórico', 'Metodología'],
+        selection: {
+          mode: 'deterministic',
+          reason: 'Canonical root resolved from the import boundary.',
+          candidates: ['main.tex'],
+        },
+        includeGraph: {
+          rootFile: 'main.tex',
+          filesInOrder: ['main.tex', 'chapters/intro.tex', 'chapters/method.tex'],
+          edges: [
+            { from: 'main.tex', to: 'chapters/intro.tex', command: 'include', line: 12 },
+          ],
+          unresolved: [],
+          blocked: [],
+          cycles: [],
+        },
+        outline: [
+          {
+            id: 'node-1',
+            title: 'Introducción',
+            level: 1,
+            nodeType: 'chapter',
+            sourcePath: 'chapters/intro.tex',
+            anchor: { start: '1', end: '40' },
+          },
+        ],
+      },
+      normalizationSummary: {
+        nodeCount: 12,
+        rootNodeIds: ['node-1'],
+        provenanceCoverage: { available: 12, unavailable: 0 },
+      },
+      replacement: null,
+      warnings: ['La bibliografía requiere una revisión manual antes de compilar.'],
+      failures: [],
+      recommendedNextSteps: [
+        {
+          code: 'REVIEW_BIBLIOGRAPHY_MAPPING',
+          message: 'Revisa la bibliografía detectada antes de continuar con QA.',
+          triggeredBy: ['warning:bibliography'],
+        },
+      ],
+    },
+    warnings: ['La bibliografía requiere una revisión manual antes de compilar.'],
+    recommendations: [
+      {
+        code: 'REVIEW_BIBLIOGRAPHY_MAPPING',
+        message: 'Revisa la bibliografía detectada antes de continuar con QA.',
+        triggeredBy: ['warning:bibliography'],
+      },
+    ],
+    startedAt: '2026-03-10T09:00:00.000Z',
+    completedAt: '2026-03-10T09:04:00.000Z',
+    createdAt: '2026-03-10T09:00:00.000Z',
+    updatedAt: '2026-03-10T09:04:00.000Z',
+  },
+};
+
+const sourcesPayload = {
+  ok: true,
+  sources: [
+    {
+      id: 'source-alpha',
+      thesisId: 'thesis-alpha',
+      sourceType: 'article',
+      title: 'Evidence-grounded methodology',
+      authors: ['María Citation'],
+      publicationYear: 2024,
+      locator: 'doi:10.1234/evidence',
+      status: 'ready',
+      ingest: {
+        ingestStatus: 'succeeded',
+        duplicateState: 'unique',
+        duplicateOfSourceId: null,
+        pdfExtractionStatus: 'succeeded',
+        pdfMetadata: { pageCount: 18 },
+        warnings: [],
+        failures: [],
+        signature: 'sig-source-alpha',
+      },
+      evidenceCount: 1,
+      claimCount: 1,
+      createdAt: '2026-03-10T09:01:00.000Z',
+      updatedAt: '2026-03-10T09:02:00.000Z',
+    },
+  ],
+};
+
+const evidencePayload = {
+  ok: true,
+  evidenceFragments: [
+    {
+      id: 'evidence-alpha',
+      thesisId: 'thesis-alpha',
+      sourceId: 'source-alpha',
+      normalizedNodeId: 'node-1',
+      taskId: 'task-1',
+      locator: 'p. 14',
+      snippet: 'La triangulación metodológica mejora la trazabilidad de resultados.',
+      extractionMethod: 'pdf-parse',
+      confidence: 0.93,
+      status: 'captured',
+      provenance: { page: 14 },
+      source: {
+        id: 'source-alpha',
+        title: 'Evidence-grounded methodology',
+        sourceType: 'article',
+        status: 'ready',
+      },
+      context: {
+        section: { id: 'node-1', title: 'Introducción', nodeType: 'chapter' },
+        task: { id: 'task-1', title: 'Relacionar evidencia', status: 'active' },
+      },
+      createdAt: '2026-03-10T09:03:00.000Z',
+      updatedAt: '2026-03-10T09:03:00.000Z',
+    },
+  ],
+};
+
+const complianceRunsPayload = {
+  ok: true,
+  complianceRuns: [
+    {
+      id: 'compliance-alpha',
+      thesisId: 'thesis-alpha',
+      policyProfileId: 'policy-alpha',
+      policyProfileVersion: '2026.1',
+      policyInstitutionId: 'uni-local',
+      status: 'completed_with_warnings',
+      summary: {
+        degradedConfidence: false,
+        warnings: [],
+        evaluatedNodeCount: 12,
+        structureSelectionMode: 'deterministic',
+      },
+      counts: { evaluated: 5, warnings: 1, skipped: 0, violations: 0 },
+      ruleResults: [],
+      issues: [
+        {
+          id: 'issue-1',
+          thesisId: 'thesis-alpha',
+          complianceRunId: 'compliance-alpha',
+          policyProfileId: 'policy-alpha',
+          ruleId: 'rule-apa',
+          normalizedNodeId: 'node-1',
+          severity: 'warning',
+          message: 'Revisar el formato APA.',
+          remediation: 'Añade la versión APA requerida.',
+          disposition: 'warning',
+          evidenceContext: {
+            sourceIds: ['source-alpha'],
+            evidenceFragmentIds: ['evidence-alpha'],
+            zoteroMappingIds: [],
+            buildRunId: 'build-alpha',
+          },
+          createdAt: '2026-03-10T09:05:00.000Z',
+          updatedAt: '2026-03-10T09:05:00.000Z',
+        },
+      ],
+      startedAt: '2026-03-10T09:05:00.000Z',
+      completedAt: '2026-03-10T09:05:30.000Z',
+      createdAt: '2026-03-10T09:05:00.000Z',
+      updatedAt: '2026-03-10T09:05:30.000Z',
+    },
+  ],
+};
+
+const academicQaRunsPayload = {
+  ok: true,
+  academicQaRuns: [
+    {
+      id: 'qa-alpha',
+      thesisId: 'thesis-alpha',
+      status: 'completed',
+      issueCategories: ['citation-weakness'],
+      assessedScope: {
+        claimIds: ['claim-1'],
+        normalizedNodeIds: ['node-1'],
+        counts: { claims: 1, sections: 1 },
+      },
+      skippedScope: [],
+      summary: {
+        findingsByCategory: {
+          'evidence-gap': 0,
+          'citation-weakness': 1,
+          methodology: 0,
+          coherence: 0,
+        },
+        assessedClaimCount: 1,
+        assessedSectionCount: 1,
+        skippedCount: 0,
+      },
+      issues: [
+        {
+          id: 'qa-1',
+          thesisId: 'thesis-alpha',
+          academicQaRunId: 'qa-alpha',
+          claimId: 'claim-1',
+          normalizedNodeId: 'node-1',
+          category: 'citation-weakness',
+          severity: 'warning',
+          message: 'Falta una referencia primaria.',
+          rationale: 'La afirmación depende de una sola referencia secundaria.',
+          remediation: 'Añade una referencia primaria o un fragmento de evidencia directo.',
+          triggeringCondition: 'weak-citation-support',
+          supportContext: {
+            sourceIds: ['source-alpha'],
+            evidenceFragmentIds: ['evidence-alpha'],
+            zoteroMappingIds: [],
+            buildRunId: 'build-alpha',
+          },
+          groundedIn: {
+            entityType: 'claim',
+            entityId: 'claim-1',
+          },
+          createdAt: '2026-03-10T09:06:00.000Z',
+          updatedAt: '2026-03-10T09:06:00.000Z',
+        },
+      ],
+      startedAt: '2026-03-10T09:06:00.000Z',
+      completedAt: '2026-03-10T09:06:30.000Z',
+      createdAt: '2026-03-10T09:06:00.000Z',
+      updatedAt: '2026-03-10T09:06:30.000Z',
+    },
+  ],
+};
+
 function mockFetchSequence(handlers: Record<string, unknown>) {
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
     const url = String(input);
@@ -138,6 +394,12 @@ describe('App', () => {
       '/theses': thesisListPayload,
       '/theses/thesis-alpha': thesisDetailPayload,
       '/theses/thesis-alpha/resume': resumePayload,
+      '/theses/thesis-alpha/intake-jobs/intake-alpha': intakeJobPayload,
+      '/theses/thesis-alpha/intake-jobs/intake-alpha/report': { ok: true, report: intakeJobPayload.intakeJob.report },
+      '/theses/thesis-alpha/sources': sourcesPayload,
+      '/theses/thesis-alpha/evidence-fragments': evidencePayload,
+      '/theses/thesis-alpha/compliance-runs': complianceRunsPayload,
+      '/theses/thesis-alpha/academic-qa-runs': academicQaRunsPayload,
     });
   });
 
@@ -175,6 +437,9 @@ describe('App', () => {
     expect(container.textContent).toContain('Latest checkpoint marker: checkpoint-alpha');
     expect(container.textContent).toContain('Compliance run marker: compliance-alpha');
     expect(container.textContent).toContain('Academic QA marker: qa-alpha');
+    expect(container.textContent).toContain('Detected input marker: latex');
+    expect(container.textContent).toContain('Evidence provenance marker: p. 14');
+    expect(container.textContent).toContain('QA issue marker: qa-1');
     expect(container.textContent).toContain('Mock connector only');
 
     root.unmount();
@@ -202,6 +467,98 @@ describe('App', () => {
     expect(container.textContent).toContain('No thesis workspaces yet');
     expect(container.textContent).toContain('Create a thesis through the API to populate the dashboard');
     expect(container.textContent).toContain('Select a thesis to inspect its persisted state');
+
+    root.unmount();
+    container.remove();
+  });
+
+  it('renders route-specific empty states for intake, research, and qa views', async () => {
+    mockFetchSequence({
+      '/status/capabilities': capabilityPayload,
+      '/theses': thesisListPayload,
+      '/theses/thesis-alpha': {
+        ok: true,
+        thesis: {
+          ...thesisListPayload.theses[0],
+          thesis: { ...thesisListPayload.theses[0].thesis, activeImportId: null },
+        },
+      },
+      '/theses/thesis-alpha/resume': {
+        ok: true,
+        resume: {
+          ...resumePayload.resume,
+          latestComplianceRun: null,
+          latestAcademicQaRun: null,
+          recentComplianceFindings: [],
+          recentAcademicQaFindings: [],
+        },
+      },
+      '/theses/thesis-alpha/sources': { ok: true, sources: [] },
+      '/theses/thesis-alpha/evidence-fragments': { ok: true, evidenceFragments: [] },
+      '/theses/thesis-alpha/compliance-runs': { ok: true, complianceRuns: [] },
+      '/theses/thesis-alpha/academic-qa-runs': { ok: true, academicQaRuns: [] },
+    });
+
+    const container = document.createElement('div');
+    document.body.append(container);
+
+    const { createRoot } = await import('react-dom/client');
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('No intake report yet');
+    expect(container.textContent).toContain('Start an intake import to capture detected inputs');
+    expect(container.textContent).toContain('No research artifacts yet');
+    expect(container.textContent).toContain('Register a source or capture an evidence fragment');
+    expect(container.textContent).toContain('No QA or compliance findings yet');
+    expect(container.textContent).toContain('Run compliance and academic QA checks');
+
+    root.unmount();
+    container.remove();
+  });
+
+  it('keeps route shells usable with recoverable error states when intake, research, or qa requests fail', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url === '/status/capabilities') {
+        return { ok: true, status: 200, json: async () => capabilityPayload };
+      }
+      if (url === '/theses') {
+        return { ok: true, status: 200, json: async () => thesisListPayload };
+      }
+      if (url === '/theses/thesis-alpha') {
+        return { ok: true, status: 200, json: async () => thesisDetailPayload };
+      }
+      if (url === '/theses/thesis-alpha/resume') {
+        return { ok: true, status: 200, json: async () => resumePayload };
+      }
+
+      return { ok: false, status: 503, json: async () => ({}) };
+    }));
+
+    const container = document.createElement('div');
+    document.body.append(container);
+
+    const { createRoot } = await import('react-dom/client');
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<App />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('Intake report unavailable');
+    expect(container.textContent).toContain('Retry the intake route after the import service recovers');
+    expect(container.textContent).toContain('Research route unavailable');
+    expect(container.textContent).toContain('The source/evidence shell remains available while the research API recovers');
+    expect(container.textContent).toContain('QA route unavailable');
+    expect(container.textContent).toContain('Retry compliance and academic QA once the analysis endpoints recover');
 
     root.unmount();
     container.remove();

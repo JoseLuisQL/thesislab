@@ -53,6 +53,143 @@ type ThesisResume = {
   recentAcademicQaFindings: Array<{ id: string; severity: string; title: string; message: string }>;
 };
 
+type IntakeRecommendation = {
+  code: string;
+  message: string;
+  triggeredBy: string[];
+};
+
+type IntakeReport = {
+  thesisId: string;
+  intakeJobId: string;
+  terminalStatus: string;
+  detectedFormat: string;
+  detection: {
+    format: string;
+    reason: string;
+    matchedBy: string;
+  };
+  extractionStatus: string;
+  normalizationStatus: string;
+  structureSummary: {
+    entrypoint: string | null;
+    itemCount: number;
+    items: string[];
+  } | null;
+  normalizationSummary: {
+    nodeCount: number;
+    provenanceCoverage: {
+      available: number;
+      unavailable: number;
+    };
+  } | null;
+  warnings: string[];
+  failures: Array<{ code: string; message: string }>;
+  recommendedNextSteps: IntakeRecommendation[];
+};
+
+type IntakeJobResponse = {
+  ok: true;
+  intakeJob: {
+    id: string;
+    detectedEntrypoint: string | null;
+    report: IntakeReport | null;
+  };
+};
+
+type IntakeReportResponse = {
+  ok: true;
+  report: IntakeReport;
+};
+
+type SourceRecord = {
+  id: string;
+  title: string;
+  sourceType: string;
+  locator: string | null;
+  status: string;
+  authors: string[];
+  publicationYear: number | null;
+  evidenceCount: number;
+  claimCount: number;
+  ingest: {
+    ingestStatus: string;
+    pdfExtractionStatus: string;
+    warnings: string[];
+  };
+};
+
+type SourcesResponse = {
+  ok: true;
+  sources: SourceRecord[];
+};
+
+type EvidenceRecord = {
+  id: string;
+  locator: string | null;
+  snippet: string;
+  extractionMethod: string;
+  status: string;
+  source: {
+    id: string;
+    title: string;
+    sourceType: string;
+    status: string;
+  };
+  context: {
+    section: { id: string; title: string | null; nodeType: string } | null;
+    task: { id: string; title: string; status: string } | null;
+  };
+};
+
+type EvidenceResponse = {
+  ok: true;
+  evidenceFragments: EvidenceRecord[];
+};
+
+type ComplianceIssue = {
+  id: string;
+  severity: string;
+  message: string;
+  remediation: string | null;
+  normalizedNodeId: string | null;
+};
+
+type ComplianceRun = {
+  id: string;
+  status: string;
+  issues: ComplianceIssue[];
+};
+
+type ComplianceRunsResponse = {
+  ok: true;
+  complianceRuns: ComplianceRun[];
+};
+
+type AcademicQaIssue = {
+  id: string;
+  category: string;
+  severity: string;
+  message: string;
+  rationale: string;
+  remediation: string | null;
+  groundedIn: {
+    entityType: string;
+    entityId: string;
+  };
+};
+
+type AcademicQaRun = {
+  id: string;
+  status: string;
+  issues: AcademicQaIssue[];
+};
+
+type AcademicQaRunsResponse = {
+  ok: true;
+  academicQaRuns: AcademicQaRun[];
+};
+
 type WorkflowCapability = {
   key: WorkflowKey;
   label: string;
@@ -108,18 +245,30 @@ type AppDataState = {
   selectedThesisId: string | null;
   selectedDetail: ThesisSummary | null;
   selectedResume: ThesisResume | null;
+  selectedIntakeJob: IntakeJobResponse['intakeJob'] | null;
+  selectedIntakeReport: IntakeReport | null;
+  selectedSources: SourceRecord[];
+  selectedEvidence: EvidenceRecord[];
+  selectedComplianceRuns: ComplianceRun[];
+  selectedAcademicQaRuns: AcademicQaRun[];
 };
 
 type LoadingState = {
   status: boolean;
   dashboard: boolean;
   thesis: boolean;
+  intake: boolean;
+  research: boolean;
+  qa: boolean;
 };
 
 type ErrorState = {
   status: string | null;
   dashboard: string | null;
   thesis: string | null;
+  intake: string | null;
+  research: string | null;
+  qa: string | null;
 };
 
 const WORKFLOW_ENTRY_ORDER: WorkflowKey[] = ['create', 'intake', 'resume', 'latex', 'qa'];
@@ -130,18 +279,30 @@ const emptyDataState: AppDataState = {
   selectedThesisId: null,
   selectedDetail: null,
   selectedResume: null,
+  selectedIntakeJob: null,
+  selectedIntakeReport: null,
+  selectedSources: [],
+  selectedEvidence: [],
+  selectedComplianceRuns: [],
+  selectedAcademicQaRuns: [],
 };
 
 const emptyLoadingState: LoadingState = {
   status: true,
   dashboard: true,
   thesis: false,
+  intake: false,
+  research: false,
+  qa: false,
 };
 
 const emptyErrorState: ErrorState = {
   status: null,
   dashboard: null,
   thesis: null,
+  intake: null,
+  research: null,
+  qa: null,
 };
 
 function formatDateTime(value: string | null | undefined) {
@@ -159,6 +320,10 @@ function formatDateTime(value: string | null | undefined) {
     dateStyle: 'medium',
     timeStyle: 'short',
   });
+}
+
+function formatSentenceList(values: string[]) {
+  return values.join(' · ');
 }
 
 async function getJson<T>(url: string): Promise<T> {
@@ -189,7 +354,7 @@ export function App() {
     let cancelled = false;
 
     async function loadDashboard() {
-      setLoading({ status: true, dashboard: true, thesis: false });
+      setLoading({ status: true, dashboard: true, thesis: false, intake: false, research: false, qa: false });
       setErrors(emptyErrorState);
 
       try {
@@ -210,16 +375,29 @@ export function App() {
           selectedThesisId,
           selectedDetail: null,
           selectedResume: null,
+          selectedIntakeJob: null,
+          selectedIntakeReport: null,
+          selectedSources: [],
+          selectedEvidence: [],
+          selectedComplianceRuns: [],
+          selectedAcademicQaRuns: [],
         });
-        setLoading({ status: false, dashboard: false, thesis: Boolean(selectedThesisId) });
+        setLoading({
+          status: false,
+          dashboard: false,
+          thesis: Boolean(selectedThesisId),
+          intake: Boolean(selectedThesisId),
+          research: Boolean(selectedThesisId),
+          qa: Boolean(selectedThesisId),
+        });
       } catch (error) {
         if (cancelled) {
           return;
         }
 
         const message = error instanceof Error ? error.message : 'No fue posible cargar el dashboard.';
-        setErrors({ status: message, dashboard: message, thesis: null });
-        setLoading({ status: false, dashboard: false, thesis: false });
+        setErrors({ status: message, dashboard: message, thesis: null, intake: null, research: null, qa: null });
+        setLoading({ status: false, dashboard: false, thesis: false, intake: false, research: false, qa: false });
       }
     }
 
@@ -233,7 +411,17 @@ export function App() {
   useEffect(() => {
     if (!data.selectedThesisId) {
       setLoading((current) => ({ ...current, thesis: false }));
-      setData((current) => ({ ...current, selectedDetail: null, selectedResume: null }));
+      setData((current) => ({
+        ...current,
+        selectedDetail: null,
+        selectedResume: null,
+        selectedIntakeJob: null,
+        selectedIntakeReport: null,
+        selectedSources: [],
+        selectedEvidence: [],
+        selectedComplianceRuns: [],
+        selectedAcademicQaRuns: [],
+      }));
       return;
     }
 
@@ -241,8 +429,8 @@ export function App() {
     const thesisId = data.selectedThesisId;
 
     async function loadThesisContext() {
-      setLoading((current) => ({ ...current, thesis: true }));
-      setErrors((current) => ({ ...current, thesis: null }));
+      setLoading((current) => ({ ...current, thesis: true, intake: true, research: true, qa: true }));
+      setErrors((current) => ({ ...current, thesis: null, intake: null, research: null, qa: null }));
 
       try {
         const [detailResponse, resumeResponse] = await Promise.all([
@@ -259,17 +447,98 @@ export function App() {
           selectedDetail: detailResponse.thesis,
           selectedResume: resumeResponse.resume,
         }));
+
+        const activeImportId = detailResponse.thesis.thesis.activeImportId;
+
+        const intakePromise = activeImportId
+          ? Promise.all([
+              getJson<IntakeJobResponse>(`/theses/${thesisId}/intake-jobs/${activeImportId}`),
+              getJson<IntakeReportResponse>(`/theses/${thesisId}/intake-jobs/${activeImportId}/report`),
+            ])
+          : Promise.resolve(null);
+
+        const researchPromise = Promise.all([
+          getJson<SourcesResponse>(`/theses/${thesisId}/sources`),
+          getJson<EvidenceResponse>(`/theses/${thesisId}/evidence-fragments`),
+        ]);
+
+        const qaPromise = Promise.all([
+          getJson<ComplianceRunsResponse>(`/theses/${thesisId}/compliance-runs`),
+          getJson<AcademicQaRunsResponse>(`/theses/${thesisId}/academic-qa-runs`),
+        ]);
+
+        const [intakeResult, researchResult, qaResult] = await Promise.allSettled([
+          intakePromise,
+          researchPromise,
+          qaPromise,
+        ]);
+
+        if (cancelled) {
+          return;
+        }
+
+        if (intakeResult.status === 'fulfilled') {
+          setData((current) => ({
+            ...current,
+            selectedIntakeJob: intakeResult.value?.[0].intakeJob ?? null,
+            selectedIntakeReport: intakeResult.value?.[1].report ?? null,
+          }));
+        } else {
+          setErrors((current) => ({
+            ...current,
+            intake: 'Intake report unavailable. Retry the intake route after the import service recovers.',
+          }));
+          setData((current) => ({ ...current, selectedIntakeJob: null, selectedIntakeReport: null }));
+        }
+
+        if (researchResult.status === 'fulfilled') {
+          setData((current) => ({
+            ...current,
+            selectedSources: researchResult.value[0].sources,
+            selectedEvidence: researchResult.value[1].evidenceFragments,
+          }));
+        } else {
+          setErrors((current) => ({
+            ...current,
+            research: 'Research route unavailable. The source/evidence shell remains available while the research API recovers.',
+          }));
+          setData((current) => ({ ...current, selectedSources: [], selectedEvidence: [] }));
+        }
+
+        if (qaResult.status === 'fulfilled') {
+          setData((current) => ({
+            ...current,
+            selectedComplianceRuns: qaResult.value[0].complianceRuns,
+            selectedAcademicQaRuns: qaResult.value[1].academicQaRuns,
+          }));
+        } else {
+          setErrors((current) => ({
+            ...current,
+            qa: 'QA route unavailable. Retry compliance and academic QA once the analysis endpoints recover.',
+          }));
+          setData((current) => ({ ...current, selectedComplianceRuns: [], selectedAcademicQaRuns: [] }));
+        }
       } catch (error) {
         if (cancelled) {
           return;
         }
 
         const message = error instanceof Error ? error.message : 'No fue posible cargar el contexto de la tesis.';
-        setErrors((current) => ({ ...current, thesis: message }));
-        setData((current) => ({ ...current, selectedDetail: null, selectedResume: null }));
+        setErrors((current) => ({ ...current, thesis: message, intake: null, research: null, qa: null }));
+        setData((current) => ({
+          ...current,
+          selectedDetail: null,
+          selectedResume: null,
+          selectedIntakeJob: null,
+          selectedIntakeReport: null,
+          selectedSources: [],
+          selectedEvidence: [],
+          selectedComplianceRuns: [],
+          selectedAcademicQaRuns: [],
+        }));
       } finally {
         if (!cancelled) {
-          setLoading((current) => ({ ...current, thesis: false }));
+          setLoading((current) => ({ ...current, thesis: false, intake: false, research: false, qa: false }));
         }
       }
     }
@@ -449,6 +718,185 @@ export function App() {
                     <p>No persisted feedback entries yet.</p>
                   )}
                 </div>
+              </article>
+            </div>
+          ) : null}
+        </section>
+      </section>
+
+      <section className="route-grid" aria-label="Domain views">
+        <section className="panel" aria-labelledby="intake-heading">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Intake report route</p>
+              <h2 id="intake-heading">Detected inputs and normalization guidance</h2>
+            </div>
+            {data.selectedIntakeJob ? <span className="meta-chip">intakeId: {data.selectedIntakeJob.id}</span> : null}
+          </div>
+
+          {loading.intake ? <p>Cargando reporte de intake...</p> : null}
+          {errors.intake ? <div className="error-state"><h3>Intake report unavailable</h3><p>{errors.intake}</p></div> : null}
+
+          {!loading.intake && !errors.intake && !data.selectedIntakeReport ? (
+            <div className="empty-state">
+              <h3>No intake report yet</h3>
+              <p>Start an intake import to capture detected inputs, structure summaries, warnings, and recommended next steps.</p>
+            </div>
+          ) : null}
+
+          {!loading.intake && !errors.intake && data.selectedIntakeReport ? (
+            <div className="detail-stack">
+              <article className="detail-card">
+                <h3>Import summary</h3>
+                <ul className="marker-list">
+                  <li>Detected input marker: {data.selectedIntakeReport.detectedFormat}</li>
+                  <li>Entrypoint marker: {data.selectedIntakeJob?.detectedEntrypoint ?? data.selectedIntakeReport.structureSummary?.entrypoint ?? 'No entrypoint detected'}</li>
+                  <li>Extraction status: {data.selectedIntakeReport.extractionStatus}</li>
+                  <li>Normalization status: {data.selectedIntakeReport.normalizationStatus}</li>
+                </ul>
+                <p>{data.selectedIntakeReport.detection.reason}</p>
+              </article>
+
+              <article className="detail-card">
+                <h3>Structure summary</h3>
+                {data.selectedIntakeReport.structureSummary ? (
+                  <>
+                    <p>{data.selectedIntakeReport.structureSummary.itemCount} items detected inside the requested thesis import.</p>
+                    <p className="card-meta">{formatSentenceList(data.selectedIntakeReport.structureSummary.items)}</p>
+                  </>
+                ) : (
+                  <p>No structure summary was persisted for this intake yet.</p>
+                )}
+                {data.selectedIntakeReport.normalizationSummary ? (
+                  <ul className="marker-list">
+                    <li>Normalized node marker: {data.selectedIntakeReport.normalizationSummary.nodeCount}</li>
+                    <li>Available provenance markers: {data.selectedIntakeReport.normalizationSummary.provenanceCoverage.available}</li>
+                  </ul>
+                ) : null}
+              </article>
+
+              <article className="detail-card">
+                <h3>Warnings and recommendations</h3>
+                {data.selectedIntakeReport.warnings.length > 0 ? (
+                  <ul className="marker-list">
+                    {data.selectedIntakeReport.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+                  </ul>
+                ) : (
+                  <p>No intake warnings were persisted for this thesis.</p>
+                )}
+                {data.selectedIntakeReport.recommendedNextSteps.length > 0 ? (
+                  <ul className="marker-list">
+                    {data.selectedIntakeReport.recommendedNextSteps.map((step) => (
+                      <li key={step.code}>
+                        <strong>{step.code}</strong>: {step.message}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>No tailored next-step recommendations were persisted yet.</p>
+                )}
+              </article>
+            </div>
+          ) : null}
+        </section>
+
+        <section className="panel" aria-labelledby="research-heading">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Source and evidence route</p>
+              <h2 id="research-heading">Traceable research artifacts</h2>
+            </div>
+            <span className="meta-chip">{data.selectedSources.length + data.selectedEvidence.length} research records</span>
+          </div>
+
+          {loading.research ? <p>Cargando artefactos de investigación...</p> : null}
+          {errors.research ? <div className="error-state"><h3>Research route unavailable</h3><p>{errors.research}</p></div> : null}
+
+          {!loading.research && !errors.research && data.selectedSources.length === 0 && data.selectedEvidence.length === 0 ? (
+            <div className="empty-state">
+              <h3>No research artifacts yet</h3>
+              <p>Register a source or capture an evidence fragment to inspect provenance, section context, and thesis-linked support.</p>
+            </div>
+          ) : null}
+
+          {!loading.research && !errors.research && (data.selectedSources.length > 0 || data.selectedEvidence.length > 0) ? (
+            <div className="detail-stack">
+              <article className="detail-card">
+                <h3>Sources</h3>
+                <ul className="marker-list">
+                  {data.selectedSources.map((source) => (
+                    <li key={source.id}>
+                      <strong>{source.title}</strong> · {source.sourceType} · status {source.status} · evidence {source.evidenceCount}
+                    </li>
+                  ))}
+                </ul>
+              </article>
+
+              <article className="detail-card">
+                <h3>Evidence fragments</h3>
+                <ul className="marker-list">
+                  {data.selectedEvidence.map((evidence) => (
+                    <li key={evidence.id}>
+                      <strong>Evidence provenance marker: {evidence.locator ?? 'No locator'}</strong> · {evidence.extractionMethod} · {evidence.context.section?.title ?? 'No section context'}
+                    </li>
+                  ))}
+                </ul>
+                {data.selectedEvidence[0] ? <p>{data.selectedEvidence[0].snippet}</p> : null}
+              </article>
+            </div>
+          ) : null}
+        </section>
+
+        <section className="panel" aria-labelledby="qa-heading">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">QA and compliance route</p>
+              <h2 id="qa-heading">Issues, severity, and remediation context</h2>
+            </div>
+            <span className="meta-chip">{data.selectedComplianceRuns.length + data.selectedAcademicQaRuns.length} runs</span>
+          </div>
+
+          {loading.qa ? <p>Cargando hallazgos de QA y compliance...</p> : null}
+          {errors.qa ? <div className="error-state"><h3>QA route unavailable</h3><p>{errors.qa}</p></div> : null}
+
+          {!loading.qa && !errors.qa && data.selectedComplianceRuns.length === 0 && data.selectedAcademicQaRuns.length === 0 ? (
+            <div className="empty-state">
+              <h3>No QA or compliance findings yet</h3>
+              <p>Run compliance and academic QA checks to surface severity, explanation, and affected thesis areas.</p>
+            </div>
+          ) : null}
+
+          {!loading.qa && !errors.qa && (data.selectedComplianceRuns.length > 0 || data.selectedAcademicQaRuns.length > 0) ? (
+            <div className="detail-stack">
+              <article className="detail-card">
+                <h3>Compliance findings</h3>
+                {data.selectedComplianceRuns[0]?.issues.length ? (
+                  <ul className="marker-list">
+                    {data.selectedComplianceRuns[0].issues.map((issue) => (
+                      <li key={issue.id}>
+                        <strong>{issue.severity}</strong> · {issue.message} · affected node {issue.normalizedNodeId ?? 'thesis-wide'}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>No compliance issues were persisted for the latest run.</p>
+                )}
+              </article>
+
+              <article className="detail-card">
+                <h3>Academic QA findings</h3>
+                {data.selectedAcademicQaRuns[0]?.issues.length ? (
+                  <ul className="marker-list">
+                    {data.selectedAcademicQaRuns[0].issues.map((issue) => (
+                      <li key={issue.id}>
+                        <strong>QA issue marker: {issue.id}</strong> · {issue.category} · {issue.severity} · {issue.groundedIn.entityType} {issue.groundedIn.entityId}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p>No academic QA issues were persisted for the latest run.</p>
+                )}
+                {data.selectedAcademicQaRuns[0]?.issues[0] ? <p>{data.selectedAcademicQaRuns[0].issues[0].rationale}</p> : null}
               </article>
             </div>
           ) : null}
