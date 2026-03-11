@@ -2040,7 +2040,9 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
   const unresolvedIncludes: NonNullable<StructureSummary['includeGraph']>['unresolved'] = [];
   const blockedIncludes: NonNullable<StructureSummary['includeGraph']>['blocked'] = [];
   const cycles: NonNullable<StructureSummary['includeGraph']>['cycles'] = [];
-  const rootId = stableNodeId('latex', path.relative(rootDir, entrypoint), 'document', 0, 'document');
+  const baseNow = new Date().toISOString();
+  const rootRelativePath = path.relative(rootDir, entrypoint);
+  const rootId = stableNodeId('latex', rootRelativePath, 'document', 0, 'document');
 
   const rootContent = fs.readFileSync(entrypoint, 'utf8');
   nodes.push({
@@ -2049,17 +2051,29 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
     nodeType: 'document',
     title: path.basename(entrypoint),
     content: null,
-    sourcePath: path.relative(rootDir, entrypoint),
+    sourcePath: rootRelativePath,
     sourceStart: '1',
     sourceEnd: String(rootContent.split(/\r?\n/).length),
     provenanceKind: 'latex',
-    provenanceJson: JSON.stringify({ kind: 'latex', filePath: path.relative(rootDir, entrypoint), lineStart: 1, lineEnd: rootContent.split(/\r?\n/).length }),
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    provenanceJson: JSON.stringify({ kind: 'latex', filePath: rootRelativePath, lineStart: 1, lineEnd: rootContent.split(/\r?\n/).length }),
+    createdAt: baseNow,
+    updatedAt: baseNow,
   });
   existingIds.add(rootId);
 
-  const sectionStack: Array<{ level: number; id: string }> = [{ level: 0, id: rootId }];
+  const sectionStackByFile = new Map<string, Array<{ level: number; id: string }>>();
+  sectionStackByFile.set(rootRelativePath, [{ level: 0, id: rootId }]);
+
+  const ensureSectionStack = (relativePath: string) => {
+    const existing = sectionStackByFile.get(relativePath);
+    if (existing) {
+      return existing;
+    }
+
+    const stack = [{ level: 0, id: rootId }];
+    sectionStackByFile.set(relativePath, stack);
+    return stack;
+  };
 
   const visitFile = (absolutePath: string) => {
     const relativePath = path.relative(rootDir, absolutePath);
@@ -2077,6 +2091,7 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
 
     const content = fs.readFileSync(absolutePath, 'utf8');
     const lines = content.split(/\r?\n/);
+    const sectionStack = ensureSectionStack(relativePath);
 
     lines.forEach((line, index) => {
       const lineNumber = index + 1;
@@ -2100,8 +2115,8 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
           sourceEnd: String(lineNumber),
           provenanceKind: 'latex',
           provenanceJson: JSON.stringify({ kind: 'latex', filePath: relativePath, lineStart: lineNumber, lineEnd: lineNumber }),
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
+          createdAt: baseNow,
+          updatedAt: baseNow,
         });
         outline.push({
           id,
@@ -2121,7 +2136,7 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
       const includeMatch = line.match(/\\(?:input|include)\{([^}]*)\}/);
       if (includeMatch) {
         const rawTarget = includeMatch[1]!.trim();
-        const command = line.includes('\\include{') ? 'include' : 'input';
+        const command = line.includes('\include{') ? 'include' : 'input';
         const candidate = rawTarget.endsWith('.tex') ? rawTarget : `${rawTarget}.tex`;
         const resolvedCandidate = path.resolve(path.dirname(absolutePath), candidate);
         const resolvedPath = fs.existsSync(resolvedCandidate) ? fs.realpathSync(resolvedCandidate) : resolvedCandidate;
@@ -2162,6 +2177,13 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
           command,
           line: lineNumber,
         });
+
+        const currentContext = sectionStack.length > 0 ? sectionStack[sectionStack.length - 1] : { level: 0, id: rootId };
+        const inheritedStack = [{ level: 0, id: rootId }];
+        if (currentContext.level > 0 && currentContext.id !== rootId) {
+          inheritedStack.push(currentContext);
+        }
+        sectionStackByFile.set(relative, inheritedStack);
         visitFile(fs.realpathSync(resolvedPath));
       }
     });
@@ -2176,9 +2198,9 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
     warnings,
     failures,
     orderedFiles,
-    entrypoint: path.relative(rootDir, entrypoint),
+    entrypoint: rootRelativePath,
     includeGraph: {
-      rootFile: path.relative(rootDir, entrypoint),
+      rootFile: rootRelativePath,
       filesInOrder: orderedFiles,
       edges: includeEdges,
       unresolved: unresolvedIncludes,

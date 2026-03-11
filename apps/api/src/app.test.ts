@@ -2134,17 +2134,26 @@ describe('thesis lifecycle registry routes', () => {
     fs.mkdirSync(path.join(latexDir, 'sections'), { recursive: true });
     fs.writeFileSync(
       path.join(latexDir, 'main.tex'),
-      '\\documentclass{report}\n\\begin{document}\n\\input{sections/intro}\n\\input{missing-section}\n\\end{document}\n',
+      String.raw`\documentclass{report}
+\begin{document}
+\input{sections/intro}
+\input{missing-section}
+\end{document}
+`,
       'utf8',
     );
     fs.writeFileSync(
       path.join(latexDir, 'sections', 'intro.tex'),
-      '\\chapter{Intro}\n\\input{loop}\n',
+      String.raw`\chapter{Intro}
+\input{loop}
+`,
       'utf8',
     );
     fs.writeFileSync(
       path.join(latexDir, 'sections', 'loop.tex'),
-      '\\section{Loop}\n\\input{intro}\n',
+      String.raw`\section{Loop}
+\input{intro}
+`,
       'utf8',
     );
 
@@ -2181,7 +2190,7 @@ describe('thesis lifecycle registry routes', () => {
               blocked: unknown[];
               cycles: Array<{ path: string[] }>;
             } | null;
-            outline: Array<{ title: string | null; level: number; sourcePath: string | null }>;
+            outline: Array<{ title: string | null; level: number; sourcePath: string | null; anchor: { start: string | null; end: string | null } }>;
           } | null;
         } | null;
       };
@@ -2210,9 +2219,115 @@ describe('thesis lifecycle registry routes', () => {
       ],
     });
     expect(intakePayload.intakeJob.report?.structureSummary?.outline).toEqual([
-      expect.objectContaining({ title: 'Intro', level: 1, sourcePath: 'sections/intro.tex' }),
-      expect.objectContaining({ title: 'Loop', level: 2, sourcePath: 'sections/loop.tex' }),
+      expect.objectContaining({ title: 'Intro', level: 1, sourcePath: 'sections/intro.tex', anchor: { start: '1', end: '1' } }),
+      expect.objectContaining({ title: 'Loop', level: 2, sourcePath: 'sections/loop.tex', anchor: { start: '1', end: '1' } }),
     ]);
+  });
+
+  it('preserves include nesting in the structural outline order and parent-child normalized nodes', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'latex-outline-nesting-'));
+    const latexDir = path.join(fixtureRoot, 'latex-project');
+    fs.mkdirSync(path.join(latexDir, 'chapters'), { recursive: true });
+    fs.mkdirSync(path.join(latexDir, 'sections'), { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'main.tex'),
+      String.raw`\documentclass{report}
+\begin{document}
+\chapter{Main Chapter}
+\input{sections/background}
+\input{chapters/results}
+\end{document}
+`,
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(latexDir, 'sections', 'background.tex'),
+      String.raw`\section{Background}
+\subsection{Prior Work}
+`,
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(latexDir, 'chapters', 'results.tex'),
+      String.raw`\chapter{Results}
+\section{Evaluation}
+`,
+      'utf8',
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis latex outline',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+    const intakePayload = intakeResponse.json() as {
+      intakeJob: {
+        id: string;
+        status: string;
+        detectedEntrypoint: string | null;
+        report: {
+          structureSummary: {
+            entrypoint: string | null;
+            selection: { mode: string; reason: string; candidates: string[] };
+            outline: Array<{ title: string | null; level: number; sourcePath: string | null; anchor: { start: string | null; end: string | null } }>;
+          } | null;
+        } | null;
+      };
+    };
+
+    expect(intakePayload.intakeJob.status).toBe('succeeded');
+    expect(intakePayload.intakeJob.detectedEntrypoint).toBe('main.tex');
+    expect(intakePayload.intakeJob.report?.structureSummary).toMatchObject({
+      entrypoint: 'main.tex',
+      selection: {
+        mode: 'deterministic',
+        candidates: ['main.tex'],
+      },
+    });
+    expect(intakePayload.intakeJob.report?.structureSummary?.outline).toEqual([
+      expect.objectContaining({ title: 'Main Chapter', level: 1, sourcePath: 'main.tex', anchor: { start: '3', end: '3' } }),
+      expect.objectContaining({ title: 'Background', level: 2, sourcePath: 'sections/background.tex', anchor: { start: '1', end: '1' } }),
+      expect.objectContaining({ title: 'Prior Work', level: 3, sourcePath: 'sections/background.tex', anchor: { start: '2', end: '2' } }),
+      expect.objectContaining({ title: 'Results', level: 1, sourcePath: 'chapters/results.tex', anchor: { start: '1', end: '1' } }),
+      expect.objectContaining({ title: 'Evaluation', level: 2, sourcePath: 'chapters/results.tex', anchor: { start: '2', end: '2' } }),
+    ]);
+
+    const nodesResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/intake-jobs/${intakePayload.intakeJob.id}/nodes`,
+    });
+
+    expect(nodesResponse.statusCode).toBe(200);
+    const nodes = (nodesResponse.json() as {
+      nodes: Array<{ id: string; title: string | null; nodeType: string; parentNodeId: string | null; sourcePath: string | null; sourceStart: string | null; sourceEnd: string | null }>;
+    }).nodes;
+
+    const mainChapter = nodes.find((node) => node.title === 'Main Chapter');
+    const background = nodes.find((node) => node.title === 'Background');
+    const priorWork = nodes.find((node) => node.title === 'Prior Work');
+    const results = nodes.find((node) => node.title === 'Results');
+    const evaluation = nodes.find((node) => node.title === 'Evaluation');
+
+    expect(mainChapter).toBeDefined();
+    expect(background).toMatchObject({ parentNodeId: mainChapter?.id, sourcePath: 'sections/background.tex', sourceStart: '1', sourceEnd: '1' });
+    expect(priorWork).toMatchObject({ parentNodeId: background?.id, sourcePath: 'sections/background.tex', sourceStart: '2', sourceEnd: '2' });
+    expect(results).toMatchObject({ parentNodeId: expect.any(String), sourcePath: 'chapters/results.tex', sourceStart: '1', sourceEnd: '1' });
+    expect(evaluation).toMatchObject({ parentNodeId: results?.id, sourcePath: 'chapters/results.tex', sourceStart: '2', sourceEnd: '2' });
+    expect(results?.parentNodeId).not.toBe(mainChapter?.id);
   });
 
   it('fails unsupported or corrupt imports explicitly without persisting a fake successful model', async () => {
