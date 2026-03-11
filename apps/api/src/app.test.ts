@@ -1247,6 +1247,7 @@ describe('thesis lifecycle registry routes', () => {
     const createdClaim = claimResponse.json() as {
       claim: {
         id: string;
+        supportSummary: string;
         linkedEvidenceCount: number;
         linkedEvidenceIds: string[];
         hasEvidence: boolean;
@@ -1259,6 +1260,7 @@ describe('thesis lifecycle registry routes', () => {
     expect(createdClaim.claim.hasEvidence).toBe(false);
     expect(createdClaim.claim.traceability.evidenceFragments).toEqual([]);
     expect(createdClaim.claim.traceability.sourceIds).toEqual([]);
+    expect(createdClaim.claim.supportSummary).toBe('Pendiente de enlazar evidencia');
 
     const linkResponse = await app.inject({
       method: 'POST',
@@ -1272,6 +1274,7 @@ describe('thesis lifecycle registry routes', () => {
     expect(linkResponse.statusCode).toBe(200);
     const linkedClaim = linkResponse.json() as {
       claim: {
+        supportSummary: string;
         linkedEvidenceCount: number;
         linkedEvidenceIds: string[];
         hasEvidence: boolean;
@@ -1285,6 +1288,7 @@ describe('thesis lifecycle registry routes', () => {
     expect(linkedClaim.claim.linkedEvidenceCount).toBe(2);
     expect(linkedClaim.claim.linkedEvidenceIds).toEqual([evidenceAId, evidenceBId]);
     expect(linkedClaim.claim.hasEvidence).toBe(true);
+    expect(linkedClaim.claim.supportSummary).toBe(JSON.stringify({ evidenceFragmentIdOrder: [evidenceAId, evidenceBId] }));
     expect(linkedClaim.claim.traceability.evidenceFragments).toEqual([
       expect.objectContaining({
         id: evidenceAId,
@@ -1340,11 +1344,12 @@ describe('thesis lifecycle registry routes', () => {
     expect(evidenceDetailAfterUnlink.statusCode).toBe(200);
 
     const unlinkedClaim = unlinkResponse.json() as {
-      claim: { linkedEvidenceIds: string[]; linkedEvidenceCount: number; hasEvidence: boolean };
+      claim: { supportSummary: string; linkedEvidenceIds: string[]; linkedEvidenceCount: number; hasEvidence: boolean };
     };
     expect(unlinkedClaim.claim.linkedEvidenceIds).toEqual([evidenceBId]);
     expect(unlinkedClaim.claim.linkedEvidenceCount).toBe(1);
     expect(unlinkedClaim.claim.hasEvidence).toBe(true);
+    expect(unlinkedClaim.claim.supportSummary).toBe(JSON.stringify({ evidenceFragmentIdOrder: [evidenceBId] }));
 
     const secondUnlinkResponse = await app.inject({
       method: 'DELETE',
@@ -1373,6 +1378,173 @@ describe('thesis lifecycle registry routes', () => {
       linkedEvidenceIds: [evidenceBId],
       linkedEvidenceCount: 1,
       hasEvidence: true,
+    });
+  });
+
+  it('keeps linked evidence ordering stable across repeated reads and unlinks when links share the same timestamp', async () => {
+    const thesisResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis de orden estable de evidencia',
+        degreeProgram: 'Doctorado en Sistemas',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-claims-stable-order',
+      },
+    });
+
+    const thesisId = (thesisResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const sourceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/sources`,
+      payload: {
+        sourceType: 'article',
+        title: 'Stable Ordering Source',
+        authors: ['Lucía Orden'],
+      },
+    });
+
+    const sourceId = (sourceResponse.json() as { source: { id: string } }).source.id;
+
+    const firstEvidenceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/evidence-fragments`,
+      payload: {
+        sourceId,
+        locator: 'p. 21',
+        snippet: 'Primer fragmento enlazado.',
+        extractionMethod: 'manual',
+      },
+    });
+    const secondEvidenceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/evidence-fragments`,
+      payload: {
+        sourceId,
+        locator: 'p. 22',
+        snippet: 'Segundo fragmento enlazado.',
+        extractionMethod: 'manual',
+      },
+    });
+    const thirdEvidenceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/evidence-fragments`,
+      payload: {
+        sourceId,
+        locator: 'p. 23',
+        snippet: 'Tercer fragmento enlazado.',
+        extractionMethod: 'manual',
+      },
+    });
+
+    const firstEvidenceId = (firstEvidenceResponse.json() as { evidenceFragment: { id: string } }).evidenceFragment.id;
+    const secondEvidenceId = (secondEvidenceResponse.json() as { evidenceFragment: { id: string } }).evidenceFragment.id;
+    const thirdEvidenceId = (thirdEvidenceResponse.json() as { evidenceFragment: { id: string } }).evidenceFragment.id;
+
+    const claimResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/claims`,
+      payload: {
+        text: 'La evidencia enlazada debe mantener un orden estable.',
+        status: 'draft',
+      },
+    });
+
+    const claimId = (claimResponse.json() as { claim: { id: string } }).claim.id;
+
+    const linkResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/claims/${claimId}/evidence-links`,
+      payload: {
+        evidenceFragmentIds: [thirdEvidenceId, firstEvidenceId, secondEvidenceId],
+        rationale: 'El orden del request debe preservarse.',
+      },
+    });
+
+    expect(linkResponse.statusCode).toBe(200);
+    expect((linkResponse.json() as { claim: { linkedEvidenceIds: string[]; traceability: { evidenceFragments: Array<{ id: string }> } } }).claim).toMatchObject({
+      linkedEvidenceIds: [thirdEvidenceId, firstEvidenceId, secondEvidenceId],
+      traceability: {
+        evidenceFragments: [
+          expect.objectContaining({ id: thirdEvidenceId }),
+          expect.objectContaining({ id: firstEvidenceId }),
+          expect.objectContaining({ id: secondEvidenceId }),
+        ],
+      },
+    });
+
+    for (let index = 0; index < 3; index += 1) {
+      const detailResponse = await app.inject({
+        method: 'GET',
+        url: `/theses/${thesisId}/claims/${claimId}`,
+      });
+      const listResponse = await app.inject({
+        method: 'GET',
+        url: `/theses/${thesisId}/claims`,
+      });
+
+      expect(detailResponse.statusCode).toBe(200);
+      expect(listResponse.statusCode).toBe(200);
+
+      const detailClaim = detailResponse.json() as {
+        claim: { linkedEvidenceIds: string[]; traceability: { evidenceFragments: Array<{ id: string }> } };
+      };
+      const listClaims = listResponse.json() as {
+        claims: Array<{ id: string; linkedEvidenceIds: string[]; traceability: { evidenceFragments: Array<{ id: string }> } }>;
+      };
+
+      expect(detailClaim.claim.linkedEvidenceIds).toEqual([thirdEvidenceId, firstEvidenceId, secondEvidenceId]);
+      expect(detailClaim.claim.traceability.evidenceFragments.map((fragment) => fragment.id)).toEqual([
+        thirdEvidenceId,
+        firstEvidenceId,
+        secondEvidenceId,
+      ]);
+      expect(listClaims.claims).toContainEqual(
+        expect.objectContaining({
+          id: claimId,
+          linkedEvidenceIds: [thirdEvidenceId, firstEvidenceId, secondEvidenceId],
+          traceability: expect.objectContaining({
+            evidenceFragments: [
+              expect.objectContaining({ id: thirdEvidenceId }),
+              expect.objectContaining({ id: firstEvidenceId }),
+              expect.objectContaining({ id: secondEvidenceId }),
+            ],
+          }),
+        }),
+      );
+    }
+
+    const unlinkResponse = await app.inject({
+      method: 'DELETE',
+      url: `/theses/${thesisId}/claims/${claimId}/evidence-links/${firstEvidenceId}`,
+    });
+
+    expect(unlinkResponse.statusCode).toBe(200);
+    expect((unlinkResponse.json() as { claim: { linkedEvidenceIds: string[]; traceability: { evidenceFragments: Array<{ id: string }> } } }).claim).toMatchObject({
+      linkedEvidenceIds: [thirdEvidenceId, secondEvidenceId],
+      traceability: {
+        evidenceFragments: [
+          expect.objectContaining({ id: thirdEvidenceId }),
+          expect.objectContaining({ id: secondEvidenceId }),
+        ],
+      },
+    });
+
+    const detailAfterUnlink = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/claims/${claimId}`,
+    });
+
+    expect(detailAfterUnlink.statusCode).toBe(200);
+    expect((detailAfterUnlink.json() as { claim: { linkedEvidenceIds: string[]; traceability: { evidenceFragments: Array<{ id: string }> } } }).claim).toMatchObject({
+      linkedEvidenceIds: [thirdEvidenceId, secondEvidenceId],
+      traceability: {
+        evidenceFragments: [
+          expect.objectContaining({ id: thirdEvidenceId }),
+          expect.objectContaining({ id: secondEvidenceId }),
+        ],
+      },
     });
   });
 

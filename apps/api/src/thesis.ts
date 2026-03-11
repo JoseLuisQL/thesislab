@@ -599,6 +599,29 @@ export type LinkClaimEvidenceInput = {
   rationale: string;
 };
 
+type ClaimEvidenceLinkRecord = typeof claimEvidenceLinks.$inferSelect;
+
+type ClaimEvidenceOrderingMetadata = {
+  evidenceFragmentIdOrder: string[];
+};
+
+function parseClaimEvidenceOrderingMetadata(rawValue: string | null): ClaimEvidenceOrderingMetadata {
+  if (!rawValue) {
+    return { evidenceFragmentIdOrder: [] };
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue) as Partial<ClaimEvidenceOrderingMetadata>;
+    return {
+      evidenceFragmentIdOrder: Array.isArray(parsed.evidenceFragmentIdOrder)
+        ? parsed.evidenceFragmentIdOrder.filter((value): value is string => typeof value === 'string')
+        : [],
+    };
+  } catch {
+    return { evidenceFragmentIdOrder: [] };
+  }
+}
+
 export class SourceNotFoundError extends Error {
   constructor(public readonly thesisId: string, public readonly sourceId: string) {
     super(`Source ${sourceId} was not found for thesis ${thesisId}.`);
@@ -1518,6 +1541,9 @@ export class ThesisLifecycleService {
     }
 
     const now = new Date().toISOString();
+    const currentOrdering = this.getClaimEvidenceOrdering(claim.supportSummary);
+    const nextEvidenceOrder = [...currentOrdering];
+
     for (const evidenceFragmentId of evidenceIds) {
       const existing = await this.db.query.claimEvidenceLinks.findFirst({
         where: (fields, operators) =>
@@ -1529,7 +1555,7 @@ export class ThesisLifecycleService {
       });
 
       if (!existing) {
-        await this.db.insert(claimEvidenceLinks).values({
+        const insertedLink = {
           id: randomUUID(),
           thesisId,
           claimId: claim.id,
@@ -1537,21 +1563,33 @@ export class ThesisLifecycleService {
           rationale: input.rationale,
           createdAt: now,
           updatedAt: now,
-        });
+        } satisfies ClaimEvidenceLinkRecord;
+
+        await this.db.insert(claimEvidenceLinks).values(insertedLink);
+      }
+
+      if (!nextEvidenceOrder.includes(evidenceFragmentId)) {
+        nextEvidenceOrder.push(evidenceFragmentId);
       }
     }
+
+    await this.persistClaimEvidenceOrdering(thesisId, claim.id, claim.supportSummary, nextEvidenceOrder, now);
 
     return this.getClaim(thesisId, claimId);
   }
 
   async unlinkClaimEvidence(thesisId: string, claimId: string, evidenceFragmentId: string): Promise<ClaimPayload> {
-    await this.requireClaim(thesisId, claimId);
+    const claim = await this.requireClaim(thesisId, claimId);
     await this.requireEvidenceFragment(thesisId, evidenceFragmentId);
     const linkId = await this.requireClaimEvidenceLink(thesisId, claimId, evidenceFragmentId);
+    const nextEvidenceOrder = this.getClaimEvidenceOrdering(claim.supportSummary).filter((id) => id !== evidenceFragmentId);
+    const now = new Date().toISOString();
 
     await this.db
       .delete(claimEvidenceLinks)
       .where(eq(claimEvidenceLinks.id, linkId));
+
+    await this.persistClaimEvidenceOrdering(thesisId, claim.id, claim.supportSummary, nextEvidenceOrder, now);
 
     return this.getClaim(thesisId, claimId);
   }
@@ -2290,24 +2328,12 @@ export class ThesisLifecycleService {
     };
   }
 
-  private async mapClaimRecord(record: { id: string; thesisId: string; normalizedNodeId: string | null; text: string; status: string; supportSummary: string; createdAt: string; updatedAt: string; }): Promise<ClaimPayload> {
-    const linkRows = await this.db
-      .select()
-      .from(claimEvidenceLinks)
-      .where(eq(claimEvidenceLinks.thesisId, record.thesisId))
-      .all();
+  private async mapClaimRecord(
+    record: { id: string; thesisId: string; normalizedNodeId: string | null; text: string; status: string; supportSummary: string; createdAt: string; updatedAt: string; },
+  ): Promise<ClaimPayload> {
+    const orderedClaimLinks = await this.listClaimEvidenceLinksForClaim(record.thesisId, record.id, record.supportSummary);
 
-    const claimLinks = linkRows
-      .filter((link) => link.claimId === record.id)
-      .sort((left, right) => {
-        if (left.createdAt === right.createdAt) {
-          return left.id.localeCompare(right.id);
-        }
-
-        return left.createdAt.localeCompare(right.createdAt);
-      });
-
-    const evidenceFragmentsPayload = await Promise.all(claimLinks.map(async (link) => {
+    const evidenceFragmentsPayload = await Promise.all(orderedClaimLinks.map(async (link) => {
       const evidence = await this.db.query.evidenceFragments.findFirst({
         where: (fields, operators) => operators.eq(fields.id, link.evidenceFragmentId),
       });
@@ -2359,6 +2385,71 @@ export class ThesisLifecycleService {
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
     };
+  }
+
+  private async listClaimEvidenceLinksForClaim(
+    thesisId: string,
+    claimId: string,
+    supportSummary?: string,
+  ): Promise<ClaimEvidenceLinkRecord[]> {
+    const linkRows = await this.db
+      .select()
+      .from(claimEvidenceLinks)
+      .where(eq(claimEvidenceLinks.thesisId, thesisId))
+      .orderBy(asc(claimEvidenceLinks.createdAt), asc(claimEvidenceLinks.id))
+      .all();
+
+    const claimLinks = linkRows.filter((link) => link.claimId === claimId);
+    const preferredOrder = this.getClaimEvidenceOrdering(supportSummary ?? '').filter((id) =>
+      claimLinks.some((link) => link.evidenceFragmentId === id),
+    );
+
+    return claimLinks.sort((left, right) => {
+      const leftOrderIndex = preferredOrder.indexOf(left.evidenceFragmentId);
+      const rightOrderIndex = preferredOrder.indexOf(right.evidenceFragmentId);
+
+      if (leftOrderIndex !== -1 || rightOrderIndex !== -1) {
+        if (leftOrderIndex === -1) {
+          return 1;
+        }
+
+        if (rightOrderIndex === -1) {
+          return -1;
+        }
+
+        return leftOrderIndex - rightOrderIndex;
+      }
+
+      if (left.createdAt === right.createdAt) {
+        return left.id.localeCompare(right.id);
+      }
+
+      return left.createdAt.localeCompare(right.createdAt);
+    });
+  }
+
+  private getClaimEvidenceOrdering(supportSummary: string): string[] {
+    return parseClaimEvidenceOrderingMetadata(supportSummary).evidenceFragmentIdOrder;
+  }
+
+  private async persistClaimEvidenceOrdering(
+    thesisId: string,
+    claimId: string,
+    supportSummary: string,
+    evidenceFragmentIdOrder: string[],
+    updatedAt: string,
+  ) {
+    await this.db
+      .update(claims)
+      .set({
+        supportSummary: JSON.stringify({
+          evidenceFragmentIdOrder,
+        } satisfies ClaimEvidenceOrderingMetadata),
+        updatedAt,
+      })
+      .where(eq(claims.id, claimId));
+
+    await this.requireClaim(thesisId, claimId);
   }
 
   private async countRows(table: typeof evidenceFragments, where: { thesisId: string; sourceId: string }) {
