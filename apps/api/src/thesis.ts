@@ -641,6 +641,19 @@ export class ClaimEvidenceScopeError extends Error {
   }
 }
 
+export class ClaimEvidenceLinkNotFoundError extends Error {
+  constructor(
+    public readonly thesisId: string,
+    public readonly claimId: string,
+    public readonly evidenceFragmentId: string,
+  ) {
+    super(
+      `Claim ${claimId} is not linked to evidence fragment ${evidenceFragmentId} for thesis ${thesisId}.`,
+    );
+    this.name = 'ClaimEvidenceLinkNotFoundError';
+  }
+}
+
 export class ThesisNotFoundError extends Error {
   constructor(thesisId: string) {
     super(`Thesis ${thesisId} was not found.`);
@@ -1534,10 +1547,11 @@ export class ThesisLifecycleService {
   async unlinkClaimEvidence(thesisId: string, claimId: string, evidenceFragmentId: string): Promise<ClaimPayload> {
     await this.requireClaim(thesisId, claimId);
     await this.requireEvidenceFragment(thesisId, evidenceFragmentId);
+    const linkId = await this.requireClaimEvidenceLink(thesisId, claimId, evidenceFragmentId);
 
     await this.db
       .delete(claimEvidenceLinks)
-      .where(eq(claimEvidenceLinks.id, await this.requireClaimEvidenceLink(thesisId, claimId, evidenceFragmentId)));
+      .where(eq(claimEvidenceLinks.id, linkId));
 
     return this.getClaim(thesisId, claimId);
   }
@@ -1613,7 +1627,11 @@ export class ThesisLifecycleService {
         ),
     });
 
-    return row?.id ?? randomUUID();
+    if (!row) {
+      throw new ClaimEvidenceLinkNotFoundError(thesisId, claimId, evidenceFragmentId);
+    }
+
+    return row.id;
   }
 
   async getResume(thesisId: string): Promise<ThesisResumePayload> {

@@ -14,6 +14,7 @@ import {
   type CreateEvidenceFragmentInput,
   type CreateIntakeJobInput,
   ClaimEvidenceScopeError,
+  ClaimEvidenceLinkNotFoundError,
   ClaimNotFoundError,
   EvidenceContextScopeError,
   EvidenceFragmentNotFoundError,
@@ -198,6 +199,17 @@ export function createApp() {
         message: error.message,
         thesisId: error.thesisId,
         claimId: error.claimId,
+      });
+    }
+
+    if (error instanceof ClaimEvidenceLinkNotFoundError) {
+      return reply.status(404).send({
+        ok: false,
+        code: 'CLAIM_EVIDENCE_LINK_NOT_FOUND',
+        message: error.message,
+        thesisId: error.thesisId,
+        claimId: error.claimId,
+        evidenceFragmentId: error.evidenceFragmentId,
       });
     }
 

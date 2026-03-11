@@ -1345,6 +1345,35 @@ describe('thesis lifecycle registry routes', () => {
     expect(unlinkedClaim.claim.linkedEvidenceIds).toEqual([evidenceBId]);
     expect(unlinkedClaim.claim.linkedEvidenceCount).toBe(1);
     expect(unlinkedClaim.claim.hasEvidence).toBe(true);
+
+    const secondUnlinkResponse = await app.inject({
+      method: 'DELETE',
+      url: `/theses/${thesisId}/claims/${createdClaim.claim.id}/evidence-links/${evidenceAId}`,
+    });
+
+    expect(secondUnlinkResponse.statusCode).toBe(404);
+    expect(secondUnlinkResponse.json()).toEqual({
+      ok: false,
+      code: 'CLAIM_EVIDENCE_LINK_NOT_FOUND',
+      message: `Claim ${createdClaim.claim.id} is not linked to evidence fragment ${evidenceAId} for thesis ${thesisId}.`,
+      thesisId,
+      claimId: createdClaim.claim.id,
+      evidenceFragmentId: evidenceAId,
+    });
+
+    const claimDetailAfterMissingUnlink = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/claims/${createdClaim.claim.id}`,
+    });
+
+    expect(claimDetailAfterMissingUnlink.statusCode).toBe(200);
+    expect((claimDetailAfterMissingUnlink.json() as {
+      claim: { linkedEvidenceIds: string[]; linkedEvidenceCount: number; hasEvidence: boolean };
+    }).claim).toMatchObject({
+      linkedEvidenceIds: [evidenceBId],
+      linkedEvidenceCount: 1,
+      hasEvidence: true,
+    });
   });
 
   it('rejects cross-thesis claim-evidence links explicitly', async () => {
