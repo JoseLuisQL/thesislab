@@ -2019,6 +2019,228 @@ Conclusiones finales.
     ]);
   });
 
+  it('creates thesis-scoped roadmap tasks with stable IDs and persists task checkpoints across detail, list, and resume flows', async () => {
+    const thesisResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis con roadmap y progreso',
+        degreeProgram: 'Doctorado en Sistemas',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-roadmap',
+      },
+    });
+
+    expect(thesisResponse.statusCode).toBe(201);
+    const thesisId = (thesisResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const taskResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/tasks`,
+      payload: {
+        title: 'Redactar marco teórico',
+        intent: 'Organizar las fuentes y cerrar la sección base del marco teórico.',
+        status: 'in_progress',
+        priority: 3,
+        sortOrder: 10,
+      },
+    });
+
+    expect(taskResponse.statusCode).toBe(201);
+    const createdTask = taskResponse.json() as {
+      task: {
+        id: string;
+        thesisId: string;
+        title: string;
+        intent: string;
+        status: string;
+        priority: number;
+        sortOrder: number;
+        activeCheckpointId: string | null;
+      };
+    };
+
+    expect(createdTask.task).toMatchObject({
+      thesisId,
+      title: 'Redactar marco teórico',
+      intent: 'Organizar las fuentes y cerrar la sección base del marco teórico.',
+      status: 'in_progress',
+      priority: 3,
+      sortOrder: 10,
+      activeCheckpointId: null,
+    });
+    expect(createdTask.task.id).toEqual(expect.any(String));
+
+    const checkpointOlderResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/tasks/${createdTask.task.id}/checkpoints`,
+      payload: {
+        label: 'Primer avance',
+        summary: 'Se completó el bosquejo inicial del capítulo.',
+        progressPercent: 35,
+        blocker: null,
+        checkpointedAt: '2026-03-10T09:00:00.000Z',
+      },
+    });
+    const checkpointLatestResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/tasks/${createdTask.task.id}/checkpoints`,
+      payload: {
+        label: 'Segundo avance',
+        summary: 'Se vinculó la bibliografía clave y quedó lista la revisión con tutor.',
+        progressPercent: 80,
+        blocker: 'Pendiente de comentarios del tutor',
+        checkpointedAt: '2026-03-10T12:00:00.000Z',
+      },
+    });
+
+    if (checkpointOlderResponse.statusCode !== 201 || checkpointLatestResponse.statusCode !== 201) {
+      throw new Error(`unexpected task checkpoint responses: ${checkpointOlderResponse.statusCode} ${checkpointOlderResponse.body} / ${checkpointLatestResponse.statusCode} ${checkpointLatestResponse.body}`);
+    }
+
+    const latestCheckpoint = checkpointLatestResponse.json() as {
+      checkpoint: {
+        id: string;
+        thesisId: string;
+        taskId: string;
+        progressPercent: number;
+        blocker: string | null;
+      };
+    };
+
+    expect(latestCheckpoint.checkpoint).toMatchObject({
+      thesisId,
+      taskId: createdTask.task.id,
+      progressPercent: 80,
+      blocker: 'Pendiente de comentarios del tutor',
+    });
+
+    const listTasksResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/tasks`,
+    });
+    const detailTaskResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/tasks/${createdTask.task.id}`,
+    });
+    const listCheckpointsResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/tasks/${createdTask.task.id}/checkpoints`,
+    });
+    const resumeResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/resume`,
+    });
+
+    expect(listTasksResponse.statusCode).toBe(200);
+    expect(detailTaskResponse.statusCode).toBe(200);
+    expect(listCheckpointsResponse.statusCode).toBe(200);
+    expect(resumeResponse.statusCode).toBe(200);
+
+    expect((listTasksResponse.json() as {
+      tasks: Array<{ id: string; activeCheckpointId: string | null; status: string; intent: string }>;
+    }).tasks).toEqual([
+      expect.objectContaining({
+        id: createdTask.task.id,
+        activeCheckpointId: latestCheckpoint.checkpoint.id,
+        status: 'in_progress',
+        intent: 'Organizar las fuentes y cerrar la sección base del marco teórico.',
+      }),
+    ]);
+
+    expect((detailTaskResponse.json() as {
+      task: { id: string; activeCheckpointId: string | null; priority: number; sortOrder: number };
+    }).task).toMatchObject({
+      id: createdTask.task.id,
+      activeCheckpointId: latestCheckpoint.checkpoint.id,
+      priority: 3,
+      sortOrder: 10,
+    });
+
+    expect((listCheckpointsResponse.json() as {
+      checkpoints: Array<{ id: string; progressPercent: number; blocker: string | null }>;
+    }).checkpoints).toEqual([
+      expect.objectContaining({
+        id: latestCheckpoint.checkpoint.id,
+        progressPercent: 80,
+        blocker: 'Pendiente de comentarios del tutor',
+      }),
+      expect.objectContaining({
+        progressPercent: 35,
+        blocker: null,
+      }),
+    ]);
+
+    expect((resumeResponse.json() as {
+      resume: {
+        activeTask: { id: string; activeCheckpointId: string | null; status: string } | null;
+        recentTaskCheckpoints: Array<{ id: string; taskId: string; progressPercent: number; blocker: string | null }>;
+      };
+    }).resume).toMatchObject({
+      activeTask: {
+        id: createdTask.task.id,
+        activeCheckpointId: latestCheckpoint.checkpoint.id,
+        status: 'in_progress',
+      },
+      recentTaskCheckpoints: [
+        {
+          id: latestCheckpoint.checkpoint.id,
+          taskId: createdTask.task.id,
+          progressPercent: 80,
+          blocker: 'Pendiente de comentarios del tutor',
+        },
+        {
+          taskId: createdTask.task.id,
+          progressPercent: 35,
+          blocker: null,
+        },
+      ],
+    });
+  });
+
+  it('fails safely for unknown workflow task detail and checkpoint routes', async () => {
+    const thesisResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis sin tareas conocidas',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-unknown-task',
+      },
+    });
+
+    const thesisId = (thesisResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const detailResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/tasks/missing-task`,
+    });
+    const checkpointListResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/tasks/missing-task/checkpoints`,
+    });
+    const checkpointCreateResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/tasks/missing-task/checkpoints`,
+      payload: {
+        label: 'Intento inválido',
+        summary: 'No debería crear un checkpoint para una tarea inexistente.',
+      },
+    });
+
+    for (const response of [detailResponse, checkpointListResponse, checkpointCreateResponse]) {
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({
+        ok: false,
+        code: 'WORKFLOW_TASK_NOT_FOUND',
+        message: `Workflow task missing-task was not found for thesis ${thesisId}.`,
+        thesisId,
+        taskId: 'missing-task',
+      });
+    }
+  });
+
   it('creates claims, links and unlinks evidence, exposes traceability, and keeps zero-evidence state explicit', async () => {
     const thesisResponse = await app.inject({
       method: 'POST',

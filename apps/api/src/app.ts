@@ -12,6 +12,7 @@ import {
   type CreateWorkflowTaskInput,
   type CreateCheckpointInput,
   type CreateClaimInput,
+  type CreateWorkflowTaskCheckpointInput,
   type CreateFeedbackInput,
   type CreateEvidenceFragmentInput,
   type CreateIntakeJobInput,
@@ -35,6 +36,7 @@ import {
   type LinkClaimEvidenceInput,
   SourceRegistrationConflictError,
   ThesisNotFoundError,
+  WorkflowTaskNotFoundError,
   ZoteroMappingNotFoundError,
   createThesisLifecycleService,
   type LatexEditRequest,
@@ -88,6 +90,14 @@ const createWorkflowTaskSchema = z.object({
   priority: z.number().int().optional(),
   sortOrder: z.number().int().optional(),
   dueAt: z.string().datetime().nullable().optional(),
+});
+
+const createWorkflowTaskCheckpointSchema = z.object({
+  label: z.string().trim().min(1),
+  summary: z.string().trim().min(1),
+  progressPercent: z.number().int().min(0).max(100).optional(),
+  blocker: z.string().trim().min(1).nullable().optional(),
+  checkpointedAt: z.string().datetime().optional(),
 });
 
 const registerSourceSchema = z.object({
@@ -316,6 +326,16 @@ export function createApp() {
         thesisId: error.thesisId,
         claimId: error.claimId,
         evidenceFragmentId: error.evidenceFragmentId,
+      });
+    }
+
+    if (error instanceof WorkflowTaskNotFoundError) {
+      return reply.status(404).send({
+        ok: false,
+        code: 'WORKFLOW_TASK_NOT_FOUND',
+        message: error.message,
+        thesisId: error.thesisId,
+        taskId: error.taskId,
       });
     }
 
@@ -595,6 +615,38 @@ export function createApp() {
     );
 
     return { ok: true, tasks };
+  });
+
+  app.get('/theses/:thesisId/tasks/:taskId', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; taskId: string };
+    const task = await (await getThesisLifecycle()).service.getWorkflowTask(params.thesisId, params.taskId);
+
+    return { ok: true, task };
+  });
+
+  app.post('/theses/:thesisId/tasks/:taskId/checkpoints', async (request, reply) => {
+    const payload = createWorkflowTaskCheckpointSchema.parse(request.body) as CreateWorkflowTaskCheckpointInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; taskId: string };
+    const checkpoint = await (await getThesisLifecycle()).service.createWorkflowTaskCheckpoint(
+      params.thesisId,
+      params.taskId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, checkpoint });
+  });
+
+  app.get('/theses/:thesisId/tasks/:taskId/checkpoints', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; taskId: string };
+    const checkpoints = await (await getThesisLifecycle()).service.listWorkflowTaskCheckpoints(
+      params.thesisId,
+      params.taskId,
+    );
+
+    return { ok: true, checkpoints };
   });
 
   app.get('/theses/:thesisId/evidence-context-setup', async (request) => {

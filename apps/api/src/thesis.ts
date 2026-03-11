@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import zlib from 'node:zlib';
 
-import { asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq } from 'drizzle-orm';
 
 import {
   academicQaIssues,
@@ -29,6 +29,7 @@ import {
   theses,
   type ThesisDbClient,
   type ThesisLifecycleState,
+  workflowTaskCheckpoints,
   workflowTasks,
 } from '@thesis-research-os/db';
 
@@ -400,6 +401,8 @@ export type ThesisResumePayload = {
   nextAction: string;
   latestCheckpoint: ThesisCheckpointPayload | null;
   recentFeedback: ThesisFeedbackPayload[];
+  activeTask: WorkflowTaskPayload | null;
+  recentTaskCheckpoints: WorkflowTaskCheckpointPayload[];
   activeWorkspace: ActiveWorkspacePayload | null;
   latestComplianceRun: ComplianceRunPayload | null;
   latestAcademicQaRun: AcademicQaRunPayload | null;
@@ -507,6 +510,27 @@ export type CreateWorkflowTaskInput = {
   priority?: number;
   sortOrder?: number;
   dueAt?: string | null;
+};
+
+export type WorkflowTaskCheckpointPayload = {
+  id: string;
+  thesisId: string;
+  taskId: string;
+  label: string;
+  summary: string;
+  progressPercent: number;
+  blocker: string | null;
+  checkpointedAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateWorkflowTaskCheckpointInput = {
+  label: string;
+  summary: string;
+  progressPercent?: number;
+  blocker?: string | null;
+  checkpointedAt?: string;
 };
 
 export type EvidenceContextSetupPayload = {
@@ -1158,6 +1182,13 @@ export class AcademicQaRunNotFoundError extends Error {
   constructor(public readonly thesisId: string, public readonly academicQaRunId: string) {
     super(`Academic QA run ${academicQaRunId} was not found for thesis ${thesisId}.`);
     this.name = 'AcademicQaRunNotFoundError';
+  }
+}
+
+export class WorkflowTaskNotFoundError extends Error {
+  constructor(public readonly thesisId: string, public readonly taskId: string) {
+    super(`Workflow task ${taskId} was not found for thesis ${thesisId}.`);
+    this.name = 'WorkflowTaskNotFoundError';
   }
 }
 
@@ -2307,6 +2338,85 @@ export class ThesisLifecycleService {
     return this.mapWorkflowTaskRecord(row);
   }
 
+  async createWorkflowTaskCheckpoint(
+    thesisId: string,
+    taskId: string,
+    input: CreateWorkflowTaskCheckpointInput,
+  ): Promise<WorkflowTaskCheckpointPayload> {
+    await this.requireThesis(thesisId);
+    await this.requireWorkflowTask(thesisId, taskId);
+
+    const now = new Date().toISOString();
+    const checkpointedAt = input.checkpointedAt ?? now;
+    const id = randomUUID();
+
+    await this.db.insert(workflowTaskCheckpoints).values({
+      id,
+      thesisId,
+      taskId,
+      label: input.label.trim(),
+      summary: input.summary.trim(),
+      progressPercent: input.progressPercent ?? 0,
+      blocker: input.blocker?.trim() || null,
+      checkpointedAt,
+      createdAt: checkpointedAt,
+      updatedAt: checkpointedAt,
+    });
+
+    await this.db
+      .update(workflowTasks)
+      .set({
+        activeCheckpointId: id,
+        updatedAt: checkpointedAt,
+      })
+      .where(eq(workflowTasks.id, taskId));
+
+    return this.getWorkflowTaskCheckpoint(thesisId, taskId, id);
+  }
+
+  async listWorkflowTaskCheckpoints(thesisId: string, taskId: string): Promise<WorkflowTaskCheckpointPayload[]> {
+    await this.requireThesis(thesisId);
+    await this.requireWorkflowTask(thesisId, taskId);
+
+    const rows = await this.db
+      .select()
+      .from(workflowTaskCheckpoints)
+      .where(
+        and(
+          eq(workflowTaskCheckpoints.thesisId, thesisId),
+          eq(workflowTaskCheckpoints.taskId, taskId),
+        ),
+      )
+      .orderBy(desc(workflowTaskCheckpoints.checkpointedAt), asc(workflowTaskCheckpoints.id))
+      .all();
+
+    return rows.map((row) => this.mapWorkflowTaskCheckpointRecord(row));
+  }
+
+  async getWorkflowTaskCheckpoint(
+    thesisId: string,
+    taskId: string,
+    checkpointId: string,
+  ): Promise<WorkflowTaskCheckpointPayload> {
+    await this.requireThesis(thesisId);
+    await this.requireWorkflowTask(thesisId, taskId);
+
+    const row = await this.db.query.workflowTaskCheckpoints.findFirst({
+      where: (fields, operators) =>
+        operators.and(
+          operators.eq(fields.id, checkpointId),
+          operators.eq(fields.thesisId, thesisId),
+          operators.eq(fields.taskId, taskId),
+        ),
+    });
+
+    if (!row) {
+      throw new WorkflowTaskNotFoundError(thesisId, taskId);
+    }
+
+    return this.mapWorkflowTaskCheckpointRecord(row);
+  }
+
   async getEvidenceContextSetup(thesisId: string): Promise<EvidenceContextSetupPayload> {
     const thesis = await this.requireThesis(thesisId);
 
@@ -2661,8 +2771,13 @@ export class ThesisLifecycleService {
     const detail = await this.getThesisDetail(thesisId);
     const checkpoints = await this.listCheckpoints(thesisId);
     const feedback = await this.listFeedback(thesisId);
+    const tasks = await this.listWorkflowTasks(thesisId);
     const complianceRuns = await this.listComplianceRuns(thesisId);
     const academicQaRuns = await this.listAcademicQaRuns(thesisId);
+    const activeTask = tasks.find((task) => task.status === 'active' || task.status === 'in_progress') ?? tasks[0] ?? null;
+    const activeTaskCheckpoints = activeTask
+      ? await this.listWorkflowTaskCheckpoints(thesisId, activeTask.id)
+      : [];
 
     return {
       thesis: detail.thesis,
@@ -2673,6 +2788,8 @@ export class ThesisLifecycleService {
       nextAction: detail.nextStepSummary,
       latestCheckpoint: checkpoints[0] ?? null,
       recentFeedback: feedback.slice(0, 5),
+      activeTask,
+      recentTaskCheckpoints: activeTaskCheckpoints.slice(0, 5),
       activeWorkspace: detail.activeWorkspace,
       latestComplianceRun: complianceRuns[0] ?? null,
       latestAcademicQaRun: academicQaRuns[0] ?? null,
@@ -3057,7 +3174,15 @@ export class ThesisLifecycleService {
     });
 
     if (!row) {
-      throw new EvidenceContextScopeError(thesisId, `Workflow task ${taskId} is not available for thesis ${thesisId}.`);
+      const crossThesis = await this.db.query.workflowTasks.findFirst({
+        where: (fields, operators) => operators.eq(fields.id, taskId),
+      });
+
+      if (crossThesis) {
+        throw new EvidenceContextScopeError(thesisId, `Workflow task ${taskId} is not available for thesis ${thesisId}.`);
+      }
+
+      throw new WorkflowTaskNotFoundError(thesisId, taskId);
     }
 
     return row;
@@ -3264,6 +3389,21 @@ export class ThesisLifecycleService {
       sortOrder: record.sortOrder,
       dueAt: record.dueAt,
       activeCheckpointId: record.activeCheckpointId,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  private mapWorkflowTaskCheckpointRecord(record: typeof workflowTaskCheckpoints.$inferSelect): WorkflowTaskCheckpointPayload {
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      taskId: record.taskId,
+      label: record.label,
+      summary: record.summary,
+      progressPercent: record.progressPercent,
+      blocker: record.blocker,
+      checkpointedAt: record.checkpointedAt,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
     };
