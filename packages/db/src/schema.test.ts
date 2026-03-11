@@ -7,6 +7,7 @@ import { eq } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 
 import { createDatabaseConnection } from './client.js';
+import { inspectMigrationJournal, runMigrations } from './migrator.js';
 import { policyProfiles, theses } from './schema.js';
 
 function createTempDatabaseUrl(prefix: string) {
@@ -434,5 +435,71 @@ conn.close()
       expect.objectContaining({ idx: 1, tag: '0001_unknown_komodo' }),
       expect.objectContaining({ idx: 2, tag: '0002_claim_evidence_ordering_json' }),
     ]);
+  });
+
+  it('bootstraps a fresh SQLite database through the full migration journal without duplicate table errors', async () => {
+    const databaseUrl = createTempDatabaseUrl('thesis-db-migrator-fresh-');
+
+    const result = await runMigrations(databaseUrl);
+    const journalRows = await inspectMigrationJournal(databaseUrl);
+
+    expect(result.filePath).toContain('db.sqlite');
+    expect(journalRows).toHaveLength(3);
+    expect(journalRows.map((row) => row.createdAt)).toEqual([0, 1, 2]);
+
+    const connection = createDatabaseConnection(databaseUrl);
+    const claimsTables = await connection.sqlite.execute("select name from sqlite_master where type='table' and name='claims'");
+    connection.sqlite.close();
+
+    expect(claimsTables.rows).toEqual([]);
+  });
+
+  it('repairs a legacy SQLite database by seeding the migration journal without reapplying duplicate base schema SQL', async () => {
+    const databaseUrl = createTempDatabaseUrl('thesis-db-migrator-legacy-');
+    const baseMigrationSql = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../drizzle/0000_domain_core.sql'),
+      'utf8',
+    );
+
+    const seedConnection = createDatabaseConnection(databaseUrl);
+    await seedConnection.sqlite.executeMultiple(baseMigrationSql);
+    seedConnection.sqlite.close();
+
+    const result = await runMigrations(databaseUrl);
+    const journalRows = await inspectMigrationJournal(databaseUrl);
+
+    expect(result.filePath).toContain('db.sqlite');
+    expect(journalRows).toHaveLength(3);
+    expect(journalRows.map((row) => row.createdAt)).toEqual([0, 1, 2]);
+
+    const verifyConnection = createDatabaseConnection(databaseUrl);
+    const thesesCount = await verifyConnection.sqlite.execute('select count(*) as count from theses');
+    verifyConnection.sqlite.close();
+
+    expect(Number(thesesCount.rows[0]?.count ?? 0)).toBe(0);
+  });
+
+  it('repairs a drifted legacy SQLite database that is missing the claim ordering column', async () => {
+    const databaseUrl = createTempDatabaseUrl('thesis-db-migrator-drifted-');
+    const baseMigrationSql = fs.readFileSync(
+      path.resolve(import.meta.dirname, '../drizzle/0000_domain_core.sql'),
+      'utf8',
+    );
+
+    const seedConnection = createDatabaseConnection(databaseUrl);
+    await seedConnection.sqlite.executeMultiple(baseMigrationSql);
+    await seedConnection.sqlite.execute('alter table claims drop column evidence_ordering_json');
+    seedConnection.sqlite.close();
+
+    await runMigrations(databaseUrl);
+    const journalRows = await inspectMigrationJournal(databaseUrl);
+    const verifyConnection = createDatabaseConnection(databaseUrl);
+    const claimsInfo = await verifyConnection.sqlite.execute("pragma table_info('claims')");
+    const claimsCount = await verifyConnection.sqlite.execute('select count(*) as count from claims');
+    verifyConnection.sqlite.close();
+
+    expect(journalRows).toHaveLength(3);
+    expect(Number(claimsCount.rows[0]?.count ?? 0)).toBe(0);
+    expect(claimsInfo.rows.map((row) => String(row.name))).not.toContain('evidence_ordering_json');
   });
 });
