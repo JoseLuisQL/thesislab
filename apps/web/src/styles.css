@@ -11,10 +11,24 @@ body {
   background: radial-gradient(circle at top, #1e293b, #020617 60%);
 }
 
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
 .shell {
-  max-width: 960px;
+  max-width: 1180px;
   margin: 0 auto;
-  padding: 4rem 1.5rem;
+  padding: 3rem 1.5rem 4rem;
+}
+
+.hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 1.5rem;
+  align-items: flex-start;
 }
 
 .eyebrow {
@@ -30,20 +44,41 @@ body {
 }
 
 .sublede {
-  max-width: 60ch;
+  max-width: 68ch;
   color: #94a3b8;
+}
+
+.refresh-button {
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: rgba(8, 47, 73, 0.45);
+  color: #e0f2fe;
+  border-radius: 999px;
+  padding: 0.75rem 1rem;
+  cursor: pointer;
+}
+
+.status-banner,
+.panel,
+.card {
+  background: rgba(15, 23, 42, 0.82);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 1rem;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.24);
 }
 
 .status-banner {
   margin-top: 2rem;
   padding: 1rem 1.25rem;
-  border: 1px solid rgba(56, 189, 248, 0.35);
-  border-radius: 1rem;
+  border-color: rgba(56, 189, 248, 0.35);
   background: rgba(8, 47, 73, 0.4);
 }
 
-.status-banner p {
+.status-banner p:last-child {
   margin-bottom: 0;
+}
+
+.status-detail {
+  color: #bae6fd;
 }
 
 .grid {
@@ -54,48 +89,54 @@ body {
 }
 
 .card {
-  background: rgba(15, 23, 42, 0.82);
-  border: 1px solid rgba(148, 163, 184, 0.25);
-  border-radius: 1rem;
   padding: 1.25rem;
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.24);
 }
 
-.card h2 {
+.card h2,
+.card h3,
+.panel h2,
+.panel h3,
+.panel h4 {
   margin-top: 0;
-}
-
-.card h3 {
-  margin: 0;
 }
 
 .badge {
   display: inline-flex;
   margin: 0 0 0.75rem;
-  color: #7dd3fc;
   font-size: 0.9rem;
   font-weight: 600;
 }
 
-.integration-panel {
-  margin-top: 3rem;
+.badge-available {
+  color: #86efac;
 }
 
-.section-heading h2 {
-  margin-top: 0;
+.badge-degraded {
+  color: #fbbf24;
 }
 
-.integration-grid {
-  margin-top: 1rem;
+.workspace-layout {
+  display: grid;
+  grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+  gap: 1rem;
+  margin-top: 2rem;
 }
 
+.panel {
+  padding: 1.25rem;
+}
+
+.panel-header,
+.detail-card-header,
+.thesis-card-header,
 .integration-header {
   display: flex;
   justify-content: space-between;
   gap: 1rem;
-  align-items: center;
+  align-items: flex-start;
 }
 
+.meta-chip,
 .status-pill {
   display: inline-flex;
   padding: 0.2rem 0.65rem;
@@ -106,7 +147,110 @@ body {
   letter-spacing: 0.08em;
 }
 
-.status-pill.degraded {
+.meta-chip {
+  color: #93c5fd;
+  background: rgba(30, 64, 175, 0.18);
+}
+
+.status-pill {
+  background: rgba(148, 163, 184, 0.16);
+  color: #cbd5e1;
+}
+
+.status-available,
+.status-active,
+.status-completed {
+  background: rgba(74, 222, 128, 0.16);
+  color: #86efac;
+}
+
+.status-degraded,
+.status-review {
   background: rgba(251, 191, 36, 0.16);
   color: #fbbf24;
+}
+
+.status-blocked,
+.status-unavailable {
+  background: rgba(248, 113, 113, 0.16);
+  color: #fca5a5;
+}
+
+.status-draft,
+.status-intake {
+  background: rgba(96, 165, 250, 0.16);
+  color: #93c5fd;
+}
+
+.thesis-list,
+.detail-stack {
+  display: grid;
+  gap: 0.9rem;
+  margin-top: 1rem;
+}
+
+.thesis-card {
+  width: 100%;
+  text-align: left;
+  background: rgba(15, 23, 42, 0.72);
+  color: inherit;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 0.9rem;
+  padding: 1rem;
+  cursor: pointer;
+}
+
+.thesis-card.selected {
+  border-color: rgba(56, 189, 248, 0.9);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.35);
+}
+
+.card-meta {
+  margin: 0.25rem 0 0;
+  color: #94a3b8;
+  font-size: 0.95rem;
+}
+
+.card-copy {
+  color: #e2e8f0;
+}
+
+.marker-list {
+  margin: 0.75rem 0 0;
+  padding-left: 1.25rem;
+  color: #cbd5e1;
+}
+
+.detail-card {
+  padding: 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 0.9rem;
+  background: rgba(2, 6, 23, 0.28);
+}
+
+.signal-block + .signal-block {
+  margin-top: 1rem;
+}
+
+.empty-state {
+  border: 1px dashed rgba(148, 163, 184, 0.3);
+  border-radius: 0.9rem;
+  padding: 1rem;
+  background: rgba(15, 23, 42, 0.36);
+}
+
+.integration-panel {
+  margin-top: 3rem;
+}
+
+.error-text {
+  color: #fca5a5;
+}
+
+@media (max-width: 900px) {
+  .hero,
+  .workspace-layout {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
 }

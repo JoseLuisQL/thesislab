@@ -491,6 +491,13 @@ export function createApp() {
     return { ok: true, mapping };
   });
 
+  app.get('/theses', async () => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const theses = await (await getThesisLifecycle()).service.listTheses();
+
+    return { ok: true, theses };
+  });
+
   app.post('/theses', async (request, reply) => {
     const payload = createThesisSchema.parse(request.body);
     process.env.DATABASE_URL = testDatabaseUrl;

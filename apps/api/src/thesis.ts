@@ -1651,6 +1651,16 @@ export class ThesisLifecycleService {
     return this.getZoteroMapping(thesisId, mappingId);
   }
 
+  async listTheses(): Promise<ThesisDetailPayload[]> {
+    const rows = await this.db
+      .select()
+      .from(theses)
+      .orderBy(desc(theses.updatedAt), desc(theses.createdAt), asc(theses.id))
+      .all();
+
+    return Promise.all(rows.map((row) => this.getThesisDetail(row.id)));
+  }
+
   async createThesis(input: CreateThesisInput): Promise<ThesisDetailPayload> {
     const now = new Date().toISOString();
     const thesisId = randomUUID();
