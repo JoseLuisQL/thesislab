@@ -76,67 +76,142 @@ import { createPersistenceHelpers } from './helpers.js';
 
 class ThesisSqliteRepository
   extends GenericSqliteRepository<ThesisRecord>
-  implements ThesisRepository {}
+  implements ThesisRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, theses);
+  }
+
+  async findBySlug(slug: string): Promise<Pick<ThesisRecord, 'id'> | null> {
+    const row = await this.db.query.theses.findFirst({
+      columns: {
+        id: true,
+      },
+      where: (fields, operators) => operators.eq(fields.slug, slug),
+    });
+
+    return row ?? null;
+  }
+}
 
 class ThesisStateSqliteRepository
   extends GenericSqliteRepository<ThesisStateRecord>
-  implements ThesisStateRepository {}
+  implements ThesisStateRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, thesisStates);
+  }
+}
 
 class WorkflowTaskSqliteRepository
   extends GenericSqliteRepository<WorkflowTaskRecord>
-  implements WorkflowTaskRepository {}
+  implements WorkflowTaskRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, workflowTasks);
+  }
+}
 
 class WorkflowTaskCheckpointSqliteRepository
   extends GenericSqliteRepository<WorkflowTaskCheckpointRecord>
-  implements WorkflowTaskCheckpointRepository {}
+  implements WorkflowTaskCheckpointRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, workflowTaskCheckpoints);
+  }
+}
 
 class WorkflowPackSqliteRepository
   extends GenericSqliteRepository<WorkflowPackRecord>
-  implements WorkflowPackRepository {}
+  implements WorkflowPackRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, workflowPacks);
+  }
+}
 
 class WorkflowStepSqliteRepository
   extends GenericSqliteRepository<WorkflowStepRecord>
-  implements WorkflowStepRepository {}
+  implements WorkflowStepRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, workflowSteps);
+  }
+}
 
 class CheckpointSqliteRepository
   extends GenericSqliteRepository<CheckpointRecord>
-  implements CheckpointRepository {}
+  implements CheckpointRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, checkpoints);
+  }
+}
 
 class FeedbackEntrySqliteRepository
   extends GenericSqliteRepository<FeedbackEntryRecord>
-  implements FeedbackEntryRepository {}
+  implements FeedbackEntryRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, feedbackEntries);
+  }
+}
 
 class IntakeJobSqliteRepository
   extends GenericSqliteRepository<IntakeJobRecord>
-  implements IntakeJobRepository {}
+  implements IntakeJobRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, intakeJobs);
+  }
+}
 
 class NormalizedNodeSqliteRepository
   extends GenericSqliteRepository<NormalizedNodeRecord>
-  implements NormalizedNodeRepository {}
+  implements NormalizedNodeRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, normalizedNodes);
+  }
+}
 
 class SourceSqliteRepository
   extends GenericSqliteRepository<SourceRecord>
-  implements SourceRepository {}
+  implements SourceRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, sources);
+  }
+}
 
 class EvidenceFragmentSqliteRepository
   extends GenericSqliteRepository<EvidenceFragmentRecord>
-  implements EvidenceFragmentRepository {}
+  implements EvidenceFragmentRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, evidenceFragments);
+  }
+}
 
 class ClaimSqliteRepository
   extends GenericSqliteRepository<ClaimRecord>
-  implements ClaimRepository {}
+  implements ClaimRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, claims);
+  }
+}
 
 class ClaimEvidenceLinkSqliteRepository
   extends GenericSqliteRepository<ClaimEvidenceLinkRecord>
-  implements ClaimEvidenceLinkRepository {}
+  implements ClaimEvidenceLinkRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, claimEvidenceLinks);
+  }
+}
 
 class ZoteroMappingSqliteRepository
   extends GenericSqliteRepository<ZoteroMappingRecord>
-  implements ZoteroMappingRepository {}
+  implements ZoteroMappingRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, zoteroMappings);
+  }
+}
 
 class PolicyProfileSqliteRepository
   extends GenericSqliteRepository<PolicyProfileRecord>
   implements PolicyProfileRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, policyProfiles);
+  }
+
   async findActive(): Promise<PolicyProfileRecord | null> {
     const row = await this.db
       .select()
@@ -151,47 +226,67 @@ class PolicyProfileSqliteRepository
 
 class ComplianceRunSqliteRepository
   extends GenericSqliteRepository<ComplianceRunRecord>
-  implements ComplianceRunRepository {}
+  implements ComplianceRunRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, complianceRuns);
+  }
+}
 
 class ComplianceIssueSqliteRepository
   extends GenericSqliteRepository<ComplianceIssueRecord>
-  implements ComplianceIssueRepository {}
+  implements ComplianceIssueRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, complianceIssues);
+  }
+}
 
 class AcademicQaRunSqliteRepository
   extends GenericSqliteRepository<AcademicQaRunRecord>
-  implements AcademicQaRunRepository {}
+  implements AcademicQaRunRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, academicQaRuns);
+  }
+}
 
 class AcademicQaIssueSqliteRepository
   extends GenericSqliteRepository<AcademicQaIssueRecord>
-  implements AcademicQaIssueRepository {}
+  implements AcademicQaIssueRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, academicQaIssues);
+  }
+}
 
 class BuildRunSqliteRepository
   extends GenericSqliteRepository<BuildRunRecord>
-  implements BuildRunRepository {}
+  implements BuildRunRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, buildRuns);
+  }
+}
 
 export function createDomainRepositories(db: ThesisDbClient): DomainRepositories {
   return {
-    theses: new ThesisSqliteRepository(db, theses),
-    thesisStates: new ThesisStateSqliteRepository(db, thesisStates),
-    workflowTasks: new WorkflowTaskSqliteRepository(db, workflowTasks),
-    workflowTaskCheckpoints: new WorkflowTaskCheckpointSqliteRepository(db, workflowTaskCheckpoints),
-    workflowPacks: new WorkflowPackSqliteRepository(db, workflowPacks),
-    workflowSteps: new WorkflowStepSqliteRepository(db, workflowSteps),
-    checkpoints: new CheckpointSqliteRepository(db, checkpoints),
-    feedbackEntries: new FeedbackEntrySqliteRepository(db, feedbackEntries),
-    intakeJobs: new IntakeJobSqliteRepository(db, intakeJobs),
-    normalizedNodes: new NormalizedNodeSqliteRepository(db, normalizedNodes),
-    sources: new SourceSqliteRepository(db, sources),
-    evidenceFragments: new EvidenceFragmentSqliteRepository(db, evidenceFragments),
-    claims: new ClaimSqliteRepository(db, claims),
-    claimEvidenceLinks: new ClaimEvidenceLinkSqliteRepository(db, claimEvidenceLinks),
-    zoteroMappings: new ZoteroMappingSqliteRepository(db, zoteroMappings),
-    policyProfiles: new PolicyProfileSqliteRepository(db, policyProfiles),
-    complianceRuns: new ComplianceRunSqliteRepository(db, complianceRuns),
-    complianceIssues: new ComplianceIssueSqliteRepository(db, complianceIssues),
-    academicQaRuns: new AcademicQaRunSqliteRepository(db, academicQaRuns),
-    academicQaIssues: new AcademicQaIssueSqliteRepository(db, academicQaIssues),
-    buildRuns: new BuildRunSqliteRepository(db, buildRuns),
+    theses: new ThesisSqliteRepository(db),
+    thesisStates: new ThesisStateSqliteRepository(db),
+    workflowTasks: new WorkflowTaskSqliteRepository(db),
+    workflowTaskCheckpoints: new WorkflowTaskCheckpointSqliteRepository(db),
+    workflowPacks: new WorkflowPackSqliteRepository(db),
+    workflowSteps: new WorkflowStepSqliteRepository(db),
+    checkpoints: new CheckpointSqliteRepository(db),
+    feedbackEntries: new FeedbackEntrySqliteRepository(db),
+    intakeJobs: new IntakeJobSqliteRepository(db),
+    normalizedNodes: new NormalizedNodeSqliteRepository(db),
+    sources: new SourceSqliteRepository(db),
+    evidenceFragments: new EvidenceFragmentSqliteRepository(db),
+    claims: new ClaimSqliteRepository(db),
+    claimEvidenceLinks: new ClaimEvidenceLinkSqliteRepository(db),
+    zoteroMappings: new ZoteroMappingSqliteRepository(db),
+    policyProfiles: new PolicyProfileSqliteRepository(db),
+    complianceRuns: new ComplianceRunSqliteRepository(db),
+    complianceIssues: new ComplianceIssueSqliteRepository(db),
+    academicQaRuns: new AcademicQaRunSqliteRepository(db),
+    academicQaIssues: new AcademicQaIssueSqliteRepository(db),
+    buildRuns: new BuildRunSqliteRepository(db),
   };
 }
 

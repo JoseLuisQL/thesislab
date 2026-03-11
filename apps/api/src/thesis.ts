@@ -10,15 +10,19 @@ import {
   createDatabaseConnection,
   buildRuns,
   checkpoints,
+  claimEvidenceLinks,
+  evidenceFragments,
   feedbackEntries,
   intakeJobs,
   normalizedNodes,
+  sources,
   type IntakeStatus,
   type SourceFormat,
   thesisStates,
   theses,
   type ThesisDbClient,
   type ThesisLifecycleState,
+  workflowTasks,
 } from '@thesis-research-os/db';
 
 type ThesisBlockers = string[];
@@ -467,6 +471,118 @@ export type CreateFeedbackInput = {
   summary?: string | null;
   recordedAt?: string;
 };
+
+type SourceIngestStatus = 'not_started' | 'queued' | 'succeeded' | 'degraded' | 'failed';
+type SourceDuplicateState = 'unique' | 'duplicate';
+type PdfExtractionStatus = 'not_attempted' | 'succeeded' | 'degraded' | 'failed';
+
+export type SourcePayload = {
+  id: string;
+  thesisId: string;
+  sourceType: 'book' | 'article' | 'web' | 'pdf' | 'note' | 'other';
+  title: string;
+  authors: string[];
+  publicationYear: number | null;
+  locator: string | null;
+  status: 'registered' | 'ingesting' | 'ready' | 'degraded' | 'failed';
+  ingest: {
+    ingestStatus: SourceIngestStatus;
+    duplicateState: SourceDuplicateState;
+    duplicateOfSourceId: string | null;
+    pdfExtractionStatus: PdfExtractionStatus;
+    pdfMetadata: Record<string, unknown> | null;
+    warnings: string[];
+    failures: IntakeFailureDiagnostic[];
+    signature: string;
+  };
+  evidenceCount: number;
+  claimCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type EvidenceFragmentPayload = {
+  id: string;
+  thesisId: string;
+  sourceId: string;
+  normalizedNodeId: string | null;
+  taskId: string | null;
+  locator: string | null;
+  snippet: string;
+  extractionMethod: string;
+  confidence: number | null;
+  status: 'captured' | 'needs_review' | 'rejected';
+  provenance: Record<string, unknown> | null;
+  source: {
+    id: string;
+    title: string;
+    sourceType: string;
+    status: string;
+  };
+  context: {
+    section: { id: string; title: string | null; nodeType: string } | null;
+    task: { id: string; title: string; status: string } | null;
+  };
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RegisterSourceInput = {
+  sourceType: 'book' | 'article' | 'web' | 'pdf' | 'note' | 'other';
+  title: string;
+  authors?: string[];
+  publicationYear?: number | null;
+  locator?: string | null;
+  ingest?: {
+    ingestStatus?: SourceIngestStatus;
+    pdfText?: string | null;
+    pdfMetadata?: Record<string, unknown> | null;
+  };
+};
+
+export type ListSourcesInput = {
+  query?: string | null;
+};
+
+export type CreateEvidenceFragmentInput = {
+  sourceId: string;
+  locator?: string | null;
+  snippet: string;
+  extractionMethod: string;
+  confidence?: number | null;
+  status?: 'captured' | 'needs_review' | 'rejected';
+  provenance?: Record<string, unknown> | null;
+  normalizedNodeId?: string | null;
+  taskId?: string | null;
+};
+
+export class SourceNotFoundError extends Error {
+  constructor(public readonly thesisId: string, public readonly sourceId: string) {
+    super(`Source ${sourceId} was not found for thesis ${thesisId}.`);
+    this.name = 'SourceNotFoundError';
+  }
+}
+
+export class SourceRegistrationConflictError extends Error {
+  constructor(public readonly thesisId: string, message: string) {
+    super(message);
+    this.name = 'SourceRegistrationConflictError';
+  }
+}
+
+export class EvidenceFragmentNotFoundError extends Error {
+  constructor(public readonly thesisId: string, public readonly evidenceFragmentId: string) {
+    super(`Evidence fragment ${evidenceFragmentId} was not found for thesis ${thesisId}.`);
+    this.name = 'EvidenceFragmentNotFoundError';
+  }
+}
+
+export class EvidenceContextScopeError extends Error {
+  constructor(public readonly thesisId: string, message: string) {
+    super(message);
+    this.name = 'EvidenceContextScopeError';
+  }
+}
 
 export class ThesisNotFoundError extends Error {
   constructor(thesisId: string) {
@@ -1138,6 +1254,167 @@ export class ThesisLifecycleService {
     return rows.map((row) => this.mapFeedbackRecord(row));
   }
 
+  async registerSource(thesisId: string, input: RegisterSourceInput): Promise<{ source: SourcePayload; duplicate: boolean }> {
+    await this.requireThesis(thesisId);
+
+    const normalizedAuthors = normalizeAuthors(input.authors ?? []);
+    const signature = createSourceSignature({
+      thesisId,
+      sourceType: input.sourceType,
+      title: input.title,
+      authors: normalizedAuthors,
+      publicationYear: input.publicationYear ?? null,
+      locator: input.locator ?? null,
+    });
+
+    const existingRows = await this.db
+      .select()
+      .from(sources)
+      .where(eq(sources.thesisId, thesisId))
+      .orderBy(asc(sources.createdAt), asc(sources.id))
+      .all();
+
+    const duplicate = existingRows.find((row) => {
+      const ingest = parseSourceIngestMetadata(row.ingestMetadataJson);
+      return ingest.signature === signature;
+    });
+
+    if (duplicate) {
+      const source = await this.getSource(thesisId, duplicate.id);
+      return { source, duplicate: true };
+    }
+
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    const ingestMetadata = buildSourceIngestMetadata({
+      sourceType: input.sourceType,
+      title: input.title,
+      locator: input.locator ?? null,
+      ingest: input.ingest,
+      signature,
+    });
+
+    await this.db.insert(sources).values({
+      id,
+      thesisId,
+      sourceType: input.sourceType,
+      title: input.title.trim(),
+      authorsJson: JSON.stringify(normalizedAuthors),
+      publicationYear: input.publicationYear ?? null,
+      locator: input.locator ?? null,
+      status: deriveSourceStatus(ingestMetadata),
+      ingestMetadataJson: JSON.stringify(ingestMetadata),
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    return {
+      source: await this.getSource(thesisId, id),
+      duplicate: false,
+    };
+  }
+
+  async listSources(thesisId: string, input: ListSourcesInput = {}): Promise<SourcePayload[]> {
+    await this.requireThesis(thesisId);
+    const query = input.query?.trim().toLocaleLowerCase() ?? '';
+    const rows = await this.db
+      .select()
+      .from(sources)
+      .where(eq(sources.thesisId, thesisId))
+      .orderBy(asc(sources.title), asc(sources.createdAt), asc(sources.id))
+      .all();
+
+    const filtered = rows.filter((row) => {
+      if (!query) {
+        return true;
+      }
+
+      const haystack = [
+        row.title,
+        row.locator ?? '',
+        ...parseStringArray(row.authorsJson),
+      ].join(' ').toLocaleLowerCase();
+
+      return haystack.includes(query);
+    });
+
+    return Promise.all(filtered.map((row) => this.mapSourceRecord(row)));
+  }
+
+  async getSource(thesisId: string, sourceId: string): Promise<SourcePayload> {
+    await this.requireThesis(thesisId);
+    const row = await this.db.query.sources.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, sourceId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!row) {
+      throw new SourceNotFoundError(thesisId, sourceId);
+    }
+
+    return this.mapSourceRecord(row);
+  }
+
+  async createEvidenceFragment(thesisId: string, input: CreateEvidenceFragmentInput): Promise<EvidenceFragmentPayload> {
+    await this.requireThesis(thesisId);
+    const source = await this.getSource(thesisId, input.sourceId);
+
+    if (input.normalizedNodeId) {
+      await this.requireNormalizedNode(thesisId, input.normalizedNodeId);
+    }
+
+    if (input.taskId) {
+      await this.requireWorkflowTask(thesisId, input.taskId);
+    }
+
+    const now = new Date().toISOString();
+    const id = randomUUID();
+    await this.db.insert(evidenceFragments).values({
+      id,
+      thesisId,
+      sourceId: source.id,
+      normalizedNodeId: input.normalizedNodeId ?? null,
+      taskId: input.taskId ?? null,
+      locator: input.locator ?? null,
+      snippet: input.snippet.trim(),
+      extractionMethod: input.extractionMethod.trim(),
+      confidence: input.confidence ?? null,
+      status: input.status ?? 'captured',
+      provenanceJson: JSON.stringify(input.provenance ?? null),
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    return this.getEvidenceFragment(thesisId, id);
+  }
+
+  async listEvidenceFragments(thesisId: string): Promise<EvidenceFragmentPayload[]> {
+    await this.requireThesis(thesisId);
+
+    const rows = await this.db
+      .select()
+      .from(evidenceFragments)
+      .where(eq(evidenceFragments.thesisId, thesisId))
+      .orderBy(desc(evidenceFragments.createdAt), asc(evidenceFragments.id))
+      .all();
+
+    return Promise.all(rows.map((row) => this.mapEvidenceFragmentRecord(row)));
+  }
+
+  async getEvidenceFragment(thesisId: string, evidenceFragmentId: string): Promise<EvidenceFragmentPayload> {
+    await this.requireThesis(thesisId);
+    const row = await this.db.query.evidenceFragments.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, evidenceFragmentId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!row) {
+      throw new EvidenceFragmentNotFoundError(thesisId, evidenceFragmentId);
+    }
+
+    return this.mapEvidenceFragmentRecord(row);
+  }
+
   async getResume(thesisId: string): Promise<ThesisResumePayload> {
     const detail = await this.getThesisDetail(thesisId);
     const checkpoints = await this.listCheckpoints(thesisId);
@@ -1511,6 +1788,32 @@ export class ThesisLifecycleService {
     return thesis;
   }
 
+  private async requireNormalizedNode(thesisId: string, normalizedNodeId: string) {
+    const row = await this.db.query.normalizedNodes.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, normalizedNodeId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!row) {
+      throw new EvidenceContextScopeError(thesisId, `Normalized node ${normalizedNodeId} is not available for thesis ${thesisId}.`);
+    }
+
+    return row;
+  }
+
+  private async requireWorkflowTask(thesisId: string, taskId: string) {
+    const row = await this.db.query.workflowTasks.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, taskId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!row) {
+      throw new EvidenceContextScopeError(thesisId, `Workflow task ${taskId} is not available for thesis ${thesisId}.`);
+    }
+
+    return row;
+  }
+
   private mapIntakeJobRecord(record: {
     id: string;
     thesisId: string;
@@ -1700,6 +2003,108 @@ export class ThesisLifecycleService {
     };
   }
 
+  private async mapSourceRecord(record: typeof sources.$inferSelect): Promise<SourcePayload> {
+    const ingest = parseSourceIngestMetadata(record.ingestMetadataJson);
+    const evidenceCount = await this.countRows(evidenceFragments, { thesisId: record.thesisId, sourceId: record.id });
+    const claimCount = await this.countRowsBySourceClaimLinks(record.thesisId, record.id);
+
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      sourceType: normalizeSourceType(record.sourceType),
+      title: record.title,
+      authors: parseStringArray(record.authorsJson),
+      publicationYear: record.publicationYear,
+      locator: record.locator,
+      status: normalizeSourceStatus(record.status),
+      ingest,
+      evidenceCount,
+      claimCount,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  private async mapEvidenceFragmentRecord(record: typeof evidenceFragments.$inferSelect): Promise<EvidenceFragmentPayload> {
+    const sourceRow = await this.db.query.sources.findFirst({
+      where: (fields, operators) => operators.eq(fields.id, record.sourceId),
+    });
+    if (!sourceRow) {
+      throw new SourceNotFoundError(record.thesisId, record.sourceId);
+    }
+    const source = await this.mapSourceRecord(sourceRow);
+    const section = record.normalizedNodeId
+      ? await this.db.query.normalizedNodes.findFirst({
+          where: (fields, operators) => operators.eq(fields.id, record.normalizedNodeId as string),
+        })
+      : null;
+    const task = record.taskId
+      ? await this.db.query.workflowTasks.findFirst({
+          where: (fields, operators) => operators.eq(fields.id, record.taskId as string),
+        })
+      : null;
+
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      sourceId: record.sourceId,
+      normalizedNodeId: record.normalizedNodeId,
+      taskId: record.taskId,
+      locator: record.locator,
+      snippet: record.snippet,
+      extractionMethod: record.extractionMethod,
+      confidence: record.confidence,
+      status: normalizeEvidenceStatus(record.status),
+      provenance: parseNullableJsonObject(record.provenanceJson),
+      source: {
+        id: source.id,
+        title: source.title,
+        sourceType: source.sourceType,
+        status: source.status,
+      },
+      context: {
+        section: section ? { id: section.id, title: section.title, nodeType: section.nodeType } : null,
+        task: task ? { id: task.id, title: task.title, status: task.status } : null,
+      },
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  private async countRows(table: typeof evidenceFragments, where: { thesisId: string; sourceId: string }) {
+    const rows = await this.db
+      .select()
+      .from(table)
+      .where(eq(table.thesisId, where.thesisId))
+      .all();
+
+    return rows.filter((row) => row.sourceId === where.sourceId).length;
+  }
+
+  private async countRowsBySourceClaimLinks(thesisId: string, sourceId: string) {
+    const evidenceRows = await this.db
+      .select()
+      .from(evidenceFragments)
+      .where(eq(evidenceFragments.thesisId, thesisId))
+      .all();
+    const relevantEvidenceIds = new Set(evidenceRows.filter((row) => row.sourceId === sourceId).map((row) => row.id));
+    if (relevantEvidenceIds.size === 0) {
+      return 0;
+    }
+
+    const linkRows = await this.db
+      .select()
+      .from(claimEvidenceLinks)
+      .where(eq(claimEvidenceLinks.thesisId, thesisId))
+      .all();
+
+    return new Set(
+      linkRows
+        .filter((row) => relevantEvidenceIds.has(row.evidenceFragmentId))
+        .map((row) => row.claimId),
+    ).size;
+  }
+
   private mapNormalizedNodeRecord(record: typeof normalizedNodes.$inferSelect): NormalizedNodePayload {
     return {
       id: record.id,
@@ -1796,6 +2201,191 @@ function normalizeFeedbackSource(value: string): ThesisFeedbackSource {
       return value;
     default:
       return 'system';
+  }
+}
+
+function normalizeAuthors(authors: string[]): string[] {
+  return authors.map((author) => author.trim()).filter(Boolean);
+}
+
+function createSourceSignature(input: {
+  thesisId: string;
+  sourceType: string;
+  title: string;
+  authors: string[];
+  publicationYear: number | null;
+  locator: string | null;
+}) {
+  return createHash('sha256')
+    .update(JSON.stringify({
+      thesisId: input.thesisId,
+      sourceType: input.sourceType,
+      title: input.title.trim().toLocaleLowerCase(),
+      authors: input.authors.map((author) => author.toLocaleLowerCase()),
+      publicationYear: input.publicationYear,
+      locator: input.locator?.trim().toLocaleLowerCase() ?? null,
+    }))
+    .digest('hex');
+}
+
+function buildSourceIngestMetadata(input: {
+  sourceType: string;
+  title: string;
+  locator: string | null;
+  ingest?: { ingestStatus?: SourceIngestStatus; pdfText?: string | null; pdfMetadata?: Record<string, unknown> | null };
+  signature: string;
+}) {
+  const pdfOutcome = input.sourceType === 'pdf'
+    ? derivePdfExtractionMetadata(input.ingest?.pdfText ?? null, input.ingest?.pdfMetadata ?? null)
+    : { pdfExtractionStatus: 'not_attempted' as PdfExtractionStatus, pdfMetadata: null, warnings: [] as string[], failures: [] as IntakeFailureDiagnostic[] };
+  const ingestStatus = input.ingest?.ingestStatus
+    ?? (input.sourceType === 'pdf'
+      ? pdfOutcome.pdfExtractionStatus === 'succeeded'
+        ? 'succeeded'
+        : pdfOutcome.pdfExtractionStatus === 'degraded'
+          ? 'degraded'
+          : pdfOutcome.pdfExtractionStatus === 'failed'
+            ? 'failed'
+            : 'queued'
+      : 'succeeded');
+
+  return {
+    ingestStatus,
+    duplicateState: 'unique' as SourceDuplicateState,
+    duplicateOfSourceId: null,
+    pdfExtractionStatus: pdfOutcome.pdfExtractionStatus,
+    pdfMetadata: pdfOutcome.pdfMetadata,
+    warnings: pdfOutcome.warnings,
+    failures: pdfOutcome.failures,
+    signature: input.signature,
+  };
+}
+
+function derivePdfExtractionMetadata(pdfText: string | null, pdfMetadata: Record<string, unknown> | null) {
+  const normalizedText = pdfText?.trim() ?? '';
+  if (!normalizedText && !pdfMetadata) {
+    return {
+      pdfExtractionStatus: 'failed' as PdfExtractionStatus,
+      pdfMetadata: null,
+      warnings: [] as string[],
+      failures: [{ code: 'PDF_TEXT_UNAVAILABLE', message: 'PDF extraction failed because no text or metadata could be recovered.' }],
+    };
+  }
+
+  if (!normalizedText || normalizedText.length < 80) {
+    return {
+      pdfExtractionStatus: 'degraded' as PdfExtractionStatus,
+      pdfMetadata: {
+        ...(pdfMetadata ?? {}),
+        extractedTextLength: normalizedText.length,
+        extractedTextPreview: normalizedText || null,
+      },
+      warnings: ['PDF extraction degraded because extracted text was weak or incomplete.'],
+      failures: [] as IntakeFailureDiagnostic[],
+    };
+  }
+
+  return {
+    pdfExtractionStatus: 'succeeded' as PdfExtractionStatus,
+    pdfMetadata: {
+      ...(pdfMetadata ?? {}),
+      extractedTextLength: normalizedText.length,
+      extractedTextPreview: normalizedText.slice(0, 240),
+    },
+    warnings: [] as string[],
+    failures: [] as IntakeFailureDiagnostic[],
+  };
+}
+
+function deriveSourceStatus(ingest: SourcePayload['ingest']): SourcePayload['status'] {
+  switch (ingest.ingestStatus) {
+    case 'queued':
+    case 'not_started':
+      return 'registered';
+    case 'succeeded':
+      return 'ready';
+    case 'degraded':
+      return 'degraded';
+    case 'failed':
+      return 'failed';
+    default:
+      return 'registered';
+  }
+}
+
+function parseSourceIngestMetadata(value: string): SourcePayload['ingest'] {
+  const parsed = parseJsonObject(value) ?? {};
+  return {
+    ingestStatus: normalizeSourceIngestStatus(typeof parsed.ingestStatus === 'string' ? parsed.ingestStatus : 'not_started'),
+    duplicateState: parsed.duplicateState === 'duplicate' ? 'duplicate' : 'unique',
+    duplicateOfSourceId: typeof parsed.duplicateOfSourceId === 'string' ? parsed.duplicateOfSourceId : null,
+    pdfExtractionStatus: normalizePdfExtractionStatus(typeof parsed.pdfExtractionStatus === 'string' ? parsed.pdfExtractionStatus : 'not_attempted'),
+    pdfMetadata: typeof parsed.pdfMetadata === 'object' && parsed.pdfMetadata !== null ? parsed.pdfMetadata as Record<string, unknown> : null,
+    warnings: Array.isArray(parsed.warnings) ? parsed.warnings.filter((item): item is string => typeof item === 'string') : [],
+    failures: Array.isArray(parsed.failures)
+      ? parsed.failures.filter((item): item is IntakeFailureDiagnostic => typeof item === 'object' && item !== null && typeof (item as { code?: unknown }).code === 'string' && typeof (item as { message?: unknown }).message === 'string')
+      : [],
+    signature: typeof parsed.signature === 'string' ? parsed.signature : '',
+  };
+}
+
+function normalizeSourceType(value: string): SourcePayload['sourceType'] {
+  switch (value) {
+    case 'book':
+    case 'article':
+    case 'web':
+    case 'pdf':
+    case 'note':
+      return value;
+    default:
+      return 'other';
+  }
+}
+
+function normalizeSourceStatus(value: string): SourcePayload['status'] {
+  switch (value) {
+    case 'registered':
+    case 'ingesting':
+    case 'ready':
+    case 'degraded':
+    case 'failed':
+      return value;
+    default:
+      return 'registered';
+  }
+}
+
+function normalizeEvidenceStatus(value: string): EvidenceFragmentPayload['status'] {
+  switch (value) {
+    case 'captured':
+    case 'needs_review':
+    case 'rejected':
+      return value;
+    default:
+      return 'needs_review';
+  }
+}
+
+function normalizeSourceIngestStatus(value: string): SourceIngestStatus {
+  switch (value) {
+    case 'queued':
+    case 'succeeded':
+    case 'degraded':
+    case 'failed':
+      return value;
+    default:
+      return 'not_started';
+  }
+}
+
+function normalizePdfExtractionStatus(value: string): PdfExtractionStatus {
+  switch (value) {
+    case 'succeeded':
+    case 'degraded':
+    case 'failed':
+      return value;
+    default:
+      return 'not_attempted';
   }
 }
 

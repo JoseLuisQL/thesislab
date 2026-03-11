@@ -10,12 +10,19 @@ import { buildLocalFirstStatusPayload } from './status.js';
 import {
   type CreateCheckpointInput,
   type CreateFeedbackInput,
+  type CreateEvidenceFragmentInput,
   type CreateIntakeJobInput,
+  EvidenceContextScopeError,
+  EvidenceFragmentNotFoundError,
   IntakeBoundaryViolationError,
   IntakeJobNotFoundError,
+  LatexBuildNotReadyError,
   LatexCheckpointRestoreError,
   LatexEditConflictError,
   LatexWorkspaceNotReadyError,
+  SourceNotFoundError,
+  type RegisterSourceInput,
+  SourceRegistrationConflictError,
   ThesisNotFoundError,
   createThesisLifecycleService,
   type LatexEditRequest,
@@ -60,6 +67,31 @@ const createFeedbackSchema = z.object({
   recordedAt: z.string().datetime().optional(),
 });
 
+const registerSourceSchema = z.object({
+  sourceType: z.enum(['book', 'article', 'web', 'pdf', 'note', 'other']),
+  title: z.string().trim().min(1),
+  authors: z.array(z.string().trim().min(1)).optional(),
+  publicationYear: z.number().int().nullable().optional(),
+  locator: z.string().trim().min(1).nullable().optional(),
+  ingest: z.object({
+    ingestStatus: z.enum(['not_started', 'queued', 'succeeded', 'degraded', 'failed']).optional(),
+    pdfText: z.string().nullable().optional(),
+    pdfMetadata: z.record(z.string(), z.unknown()).nullable().optional(),
+  }).optional(),
+});
+
+const createEvidenceFragmentSchema = z.object({
+  sourceId: z.string().trim().min(1),
+  locator: z.string().trim().min(1).nullable().optional(),
+  snippet: z.string().trim().min(1),
+  extractionMethod: z.string().trim().min(1),
+  confidence: z.number().min(0).max(1).nullable().optional(),
+  status: z.enum(['captured', 'needs_review', 'rejected']).optional(),
+  provenance: z.record(z.string(), z.unknown()).nullable().optional(),
+  normalizedNodeId: z.string().trim().min(1).nullable().optional(),
+  taskId: z.string().trim().min(1).nullable().optional(),
+});
+
 const createIntakeJobSchema = z.object({
   importRootPath: z.string().trim().min(1),
 });
@@ -75,6 +107,10 @@ const latexEditSchema = z.object({
   }),
   replacement: z.string(),
   note: z.string().trim().min(1).nullable().optional(),
+  createdBy: z.string().trim().min(1),
+});
+
+const latexBuildSchema = z.object({
   createdBy: z.string().trim().min(1),
 });
 
@@ -119,6 +155,35 @@ export function createApp() {
       });
     }
 
+    if (error instanceof SourceNotFoundError) {
+      return reply.status(404).send({
+        ok: false,
+        code: 'SOURCE_NOT_FOUND',
+        message: error.message,
+        thesisId: error.thesisId,
+        sourceId: error.sourceId,
+      });
+    }
+
+    if (error instanceof EvidenceFragmentNotFoundError) {
+      return reply.status(404).send({
+        ok: false,
+        code: 'EVIDENCE_FRAGMENT_NOT_FOUND',
+        message: error.message,
+        thesisId: error.thesisId,
+        evidenceFragmentId: error.evidenceFragmentId,
+      });
+    }
+
+    if (error instanceof SourceRegistrationConflictError || error instanceof EvidenceContextScopeError) {
+      return reply.status(409).send({
+        ok: false,
+        code: error instanceof SourceRegistrationConflictError ? 'SOURCE_REGISTRATION_CONFLICT' : 'EVIDENCE_CONTEXT_SCOPE_ERROR',
+        message: error.message,
+        thesisId: error.thesisId,
+      });
+    }
+
     if (error instanceof IntakeBoundaryViolationError) {
       return reply.status(400).send({
         ok: false,
@@ -157,6 +222,15 @@ export function createApp() {
         message: error.message,
         thesisId: error.thesisId,
         checkpointId: error.checkpointId,
+      });
+    }
+
+    if (error instanceof LatexBuildNotReadyError) {
+      return reply.status(409).send({
+        ok: false,
+        code: 'LATEX_BUILD_NOT_READY',
+        message: error.message,
+        thesisId: error.thesisId,
       });
     }
 
@@ -262,6 +336,65 @@ export function createApp() {
     return { ok: true, feedback };
   });
 
+  app.post('/theses/:thesisId/sources', async (request, reply) => {
+    const payload = registerSourceSchema.parse(request.body) as RegisterSourceInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const result = await (await getThesisLifecycle()).service.registerSource(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(result.duplicate ? 200 : 201).send({ ok: true, source: result.source, duplicate: result.duplicate });
+  });
+
+  app.get('/theses/:thesisId/sources', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string };
+    const query = (request.query as { q?: string } | undefined)?.q ?? null;
+    const sources = await (await getThesisLifecycle()).service.listSources(params.thesisId, { query });
+
+    return { ok: true, sources };
+  });
+
+  app.get('/theses/:thesisId/sources/:sourceId', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; sourceId: string };
+    const source = await (await getThesisLifecycle()).service.getSource(params.thesisId, params.sourceId);
+
+    return { ok: true, source };
+  });
+
+  app.post('/theses/:thesisId/evidence-fragments', async (request, reply) => {
+    const payload = createEvidenceFragmentSchema.parse(request.body) as CreateEvidenceFragmentInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const evidenceFragment = await (await getThesisLifecycle()).service.createEvidenceFragment(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, evidenceFragment });
+  });
+
+  app.get('/theses/:thesisId/evidence-fragments', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const evidenceFragments = await (await getThesisLifecycle()).service.listEvidenceFragments(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, evidenceFragments };
+  });
+
+  app.get('/theses/:thesisId/evidence-fragments/:evidenceFragmentId', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; evidenceFragmentId: string };
+    const evidenceFragment = await (await getThesisLifecycle()).service.getEvidenceFragment(
+      params.thesisId,
+      params.evidenceFragmentId,
+    );
+
+    return { ok: true, evidenceFragment };
+  });
+
   app.get('/theses/:thesisId/resume', async (request) => {
     process.env.DATABASE_URL = testDatabaseUrl;
     const resume = await (await getThesisLifecycle()).service.getResume(
@@ -323,6 +456,41 @@ export function createApp() {
     const restore = await (await getThesisLifecycle()).service.restoreLatexCheckpoint(params.thesisId, params.checkpointId);
 
     return { ok: true, restore };
+  });
+
+  app.post('/theses/:thesisId/latex/builds', async (request, reply) => {
+    const payload = latexBuildSchema.parse(request.body) as { createdBy: string };
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const build = await (await getThesisLifecycle()).service.runLatexBuild(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, build });
+  });
+
+  app.get('/theses/:thesisId/latex/builds', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const builds = await (await getThesisLifecycle()).service.listBuildRuns(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return {
+      ok: true,
+      history: {
+        latestAttempted: builds[0] ?? null,
+        latestSuccessful: builds.find((build) => build.isLatestSuccessful) ?? null,
+        runs: builds,
+      },
+    };
+  });
+
+  app.get('/theses/:thesisId/latex/builds/:buildRunId', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; buildRunId: string };
+    const buildRun = await (await getThesisLifecycle()).service.getBuildRun(params.thesisId, params.buildRunId);
+
+    return { ok: true, buildRun };
   });
 
   return app;
