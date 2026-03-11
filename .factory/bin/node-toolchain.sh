@@ -16,7 +16,23 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 run_container() {
-  docker run --rm -t     -v "$ROOT:$WORKDIR"     -w "$WORKDIR"     -e CI=1     "$IMAGE"     bash -lc "$1"
+  docker run --rm -t \
+    -v "$ROOT:$WORKDIR" \
+    -v /var/run/docker.sock:/var/run/docker.sock \
+    -w "$WORKDIR" \
+    -e CI=1 \
+    -e DOCKER_API_VERSION="${DOCKER_API_VERSION:-1.44}" \
+    -e HOST_REPO_ROOT="$ROOT" \
+    "$IMAGE" \
+    bash -lc "
+      set -e
+      if ! command -v docker >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update >/dev/null
+        apt-get install -y docker.io >/dev/null
+      fi
+      $1
+    "
 }
 
 prepare_pnpm() {
