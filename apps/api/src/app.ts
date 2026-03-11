@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { buildHealthPayload } from '@thesis-research-os/shared';
 import { getDatabaseFilePath, runMigrations } from '@thesis-research-os/db';
 
-import { buildLocalFirstStatusPayload } from './status.js';
+import { buildLocalFirstStatusPayload, type LocalFirstStatusOptions } from './status.js';
 import {
   type CreateWorkflowTaskInput,
   type CreateWorkflowPackInput,
@@ -464,6 +464,74 @@ export function createApp() {
   }));
 
   app.get('/status/capabilities', async () => buildLocalFirstStatusPayload());
+
+  app.get('/theses/:thesisId/status/capabilities', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const thesisId = (request.params as { thesisId: string }).thesisId;
+    const lifecycle = await getThesisLifecycle();
+    const [detail, resume] = await Promise.all([
+      lifecycle.service.getThesisDetail(thesisId),
+      lifecycle.service.getResume(thesisId),
+    ]);
+
+    const workflowOverrides: LocalFirstStatusOptions['workflowOverrides'] = {
+      create: {
+        key: 'create',
+        state: 'available',
+        summary: `Ready for thesis ${detail.thesis.title}`,
+        detail: 'Local thesis creation remains available even while optional integrations are degraded.',
+      },
+      intake: detail.activeWorkspace
+        ? {
+            key: 'intake',
+            state: 'available',
+            summary: `Active ${detail.activeWorkspace.detectedFormat.toUpperCase()} workspace available`,
+            detail: `Local intake completed for ${detail.activeWorkspace.intakeJobId} with ${detail.activeWorkspace.nodeCount} normalized nodes and no required connector dependency.`,
+          }
+        : {
+            key: 'intake',
+            state: 'available',
+            summary: 'Ready for first local import',
+            detail: 'The thesis can run intake locally without optional connectors; no active imported workspace exists yet.',
+          },
+      resume: {
+        key: 'resume',
+        state: 'available',
+        summary: resume.latestCheckpoint
+          ? `Resume from checkpoint ${resume.latestCheckpoint.id}`
+          : 'Resume baseline available',
+        detail: `Continuation guidance stays local-first with ${resume.recentFeedback.length} recent feedback entries and ${resume.blockers.length} explicit blockers.`,
+      },
+      latex: detail.activeWorkspace?.detectedFormat === 'latex'
+        ? {
+            key: 'latex',
+            state: 'available',
+            summary: detail.activeWorkspace.latestBuildRunId
+              ? `LaTeX workspace ready with build ${detail.activeWorkspace.latestBuildRunId}`
+              : 'LaTeX workspace ready for local edits/builds',
+            detail: `LaTeX operations run against the active workspace entrypoint ${detail.activeWorkspace.entrypoint ?? 'main.tex'} without depending on optional connectors.`,
+          }
+        : {
+            key: 'latex',
+            state: 'available',
+            summary: 'Ready when a LaTeX workspace is active',
+            detail: 'The local LaTeX workbench remains available, but this thesis does not currently have an active LaTeX workspace.',
+          },
+      qa: {
+        key: 'qa',
+        state: 'available',
+        summary: resume.latestAcademicQaRun || resume.latestComplianceRun
+          ? 'Latest local QA history available'
+          : 'Ready for first local QA run',
+        detail: `Academic QA and compliance remain usable locally; this thesis currently has ${resume.recentAcademicQaFindings.length} recent QA findings and ${resume.recentComplianceFindings.length} recent compliance findings.`,
+      },
+    };
+
+    return buildLocalFirstStatusPayload({
+      mission: 'hardening',
+      workflowOverrides,
+    });
+  });
 
   app.get('/zotero/libraries', async () => {
     process.env.DATABASE_URL = testDatabaseUrl;

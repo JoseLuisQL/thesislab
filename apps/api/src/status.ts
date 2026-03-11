@@ -1,8 +1,11 @@
 type CapabilityState = 'available' | 'degraded' | 'unavailable';
 type CapabilityKind = 'core' | 'integration';
 
+type WorkflowKey = 'create' | 'intake' | 'resume' | 'latex' | 'qa';
+type IntegrationKey = 'zotero' | 'connectors';
+
 export type WorkflowCapability = {
-  key: 'create' | 'intake' | 'resume' | 'latex' | 'qa';
+  key: WorkflowKey;
   label: string;
   state: CapabilityState;
   kind: CapabilityKind;
@@ -12,13 +15,33 @@ export type WorkflowCapability = {
 };
 
 export type IntegrationCapability = {
-  key: 'zotero' | 'connectors';
+  key: IntegrationKey;
   label: string;
   state: CapabilityState;
   kind: CapabilityKind;
   optional: true;
   summary: string;
   detail: string;
+};
+
+export type IntegrationStatusSnapshot = {
+  key: IntegrationKey;
+  state: CapabilityState;
+  summary: string;
+  detail: string;
+};
+
+export type WorkflowStatusSnapshot = {
+  key: WorkflowKey;
+  state: CapabilityState;
+  summary: string;
+  detail: string;
+};
+
+export type LocalFirstStatusOptions = {
+  mission?: string;
+  workflowOverrides?: Partial<Record<WorkflowKey, WorkflowStatusSnapshot>>;
+  integrationOverrides?: Partial<Record<IntegrationKey, IntegrationStatusSnapshot>>;
 };
 
 export type LocalFirstStatusPayload = {
@@ -36,16 +59,74 @@ export type LocalFirstStatusPayload = {
   integrations: IntegrationCapability[];
 };
 
-const mission = 'foundation-platform';
+const defaultMission = 'hardening';
 
-export function buildLocalFirstStatusPayload(): LocalFirstStatusPayload {
+export function buildLocalFirstStatusPayload(options: LocalFirstStatusOptions = {}): LocalFirstStatusPayload {
   const timestamp = new Date().toISOString();
   const zoteroMode = process.env.ZOTERO_CONNECTOR_MODE?.trim() || 'mock';
+  const workflowDefaults: Record<WorkflowKey, WorkflowStatusSnapshot> = {
+    create: {
+      key: 'create',
+      state: 'available',
+      summary: 'Ready',
+      detail: 'Local thesis creation remains available without any external connector.',
+    },
+    intake: {
+      key: 'intake',
+      state: 'available',
+      summary: 'Ready',
+      detail: 'Intake status is tracked as part of the local-first thesis workflow surface.',
+    },
+    resume: {
+      key: 'resume',
+      state: 'available',
+      summary: 'Ready',
+      detail: 'Resume posture remains available from persisted local thesis state.',
+    },
+    latex: {
+      key: 'latex',
+      state: 'available',
+      summary: 'Ready',
+      detail: 'LaTeX workspace operations are part of the local-first surface contract.',
+    },
+    qa: {
+      key: 'qa',
+      state: 'available',
+      summary: 'Ready',
+      detail: 'Academic QA remains available independently of optional integrations.',
+    },
+  };
+  const integrationDefaults: Record<IntegrationKey, IntegrationStatusSnapshot> = {
+    zotero: {
+      key: 'zotero',
+      state: 'degraded',
+      summary: zoteroMode === 'mock' ? 'Mock connector only' : 'Connector not fully attached',
+      detail:
+        zoteroMode === 'mock'
+          ? 'Zotero runs in mock mode, so local workflows remain usable while bibliography sync is explicitly degraded.'
+          : `Zotero connector mode "${zoteroMode}" is configured, but the connector-backed capability is still treated as an optional degraded integration.`,
+    },
+    connectors: {
+      key: 'connectors',
+      state: 'degraded',
+      summary: 'Optional adapters unavailable',
+      detail:
+        'OpenClaw-specific or other connector-backed capabilities are optional and currently surfaced as degraded rather than silently disappearing.',
+    },
+  };
+  const workflows = {
+    ...workflowDefaults,
+    ...(options.workflowOverrides ?? {}),
+  };
+  const integrations = {
+    ...integrationDefaults,
+    ...(options.integrationOverrides ?? {}),
+  };
 
   return {
     ok: true,
     service: 'api',
-    mission,
+    mission: options.mission ?? defaultMission,
     timestamp,
     posture: {
       mode: 'local-first',
@@ -58,71 +139,67 @@ export function buildLocalFirstStatusPayload(): LocalFirstStatusPayload {
       {
         key: 'create',
         label: 'Create thesis',
-        state: 'available',
+        state: workflows.create.state,
         kind: 'core',
         localFirst: true,
-        summary: 'Ready',
-        detail: 'Local thesis creation remains available without any external connector.',
+        summary: workflows.create.summary,
+        detail: workflows.create.detail,
       },
       {
         key: 'intake',
         label: 'Import thesis',
-        state: 'available',
+        state: workflows.intake.state,
         kind: 'core',
         localFirst: true,
-        summary: 'Ready',
-        detail: 'Intake status is tracked as part of the local-first thesis workflow surface.',
+        summary: workflows.intake.summary,
+        detail: workflows.intake.detail,
       },
       {
         key: 'resume',
         label: 'Resume work',
-        state: 'available',
+        state: workflows.resume.state,
         kind: 'core',
         localFirst: true,
-        summary: 'Ready',
-        detail: 'Resume posture remains available from persisted local thesis state.',
+        summary: workflows.resume.summary,
+        detail: workflows.resume.detail,
       },
       {
         key: 'latex',
         label: 'LaTeX workbench',
-        state: 'available',
+        state: workflows.latex.state,
         kind: 'core',
         localFirst: true,
-        summary: 'Ready',
-        detail: 'LaTeX workspace operations are part of the local-first surface contract.',
+        summary: workflows.latex.summary,
+        detail: workflows.latex.detail,
       },
       {
         key: 'qa',
         label: 'QA review',
-        state: 'available',
+        state: workflows.qa.state,
         kind: 'core',
         localFirst: true,
-        summary: 'Ready',
-        detail: 'Academic QA remains available independently of optional integrations.',
+        summary: workflows.qa.summary,
+        detail: workflows.qa.detail,
       },
     ],
     integrations: [
       {
         key: 'zotero',
         label: 'Zotero connector',
-        state: 'degraded',
+        state: integrations.zotero.state,
         kind: 'integration',
         optional: true,
-        summary: zoteroMode === 'mock' ? 'Mock connector only' : 'Connector not fully attached',
-        detail:
-          zoteroMode === 'mock'
-            ? 'Zotero runs in mock mode, so local workflows remain usable while bibliography sync is explicitly degraded.'
-            : `Zotero connector mode \"${zoteroMode}\" is configured, but the connector-backed capability is still treated as an optional degraded integration.`,
+        summary: integrations.zotero.summary,
+        detail: integrations.zotero.detail,
       },
       {
         key: 'connectors',
         label: 'External connector adapters',
-        state: 'degraded',
+        state: integrations.connectors.state,
         kind: 'integration',
         optional: true,
-        summary: 'Optional adapters unavailable',
-        detail:
-          'OpenClaw-specific or other connector-backed capabilities are optional and currently surfaced as degraded rather than silently disappearing.',
+        summary: integrations.connectors.summary,
+        detail: integrations.connectors.detail,
       },
     ],
   };

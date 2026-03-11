@@ -135,7 +135,7 @@ describe('GET /status/capabilities', () => {
 
     expect(payload.ok).toBe(true);
     expect(payload.service).toBe('api');
-    expect(payload.mission).toBe('foundation-platform');
+    expect(payload.mission).toBe('hardening');
     expect(payload.posture).toMatchObject({
       mode: 'local-first',
       state: 'ready',
@@ -246,6 +246,7 @@ describe('GET /status/capabilities', () => {
       }),
     );
   });
+
 });
 
 describe('GET /zotero/*', () => {
