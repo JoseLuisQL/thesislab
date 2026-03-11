@@ -127,8 +127,7 @@ describe('schema migrations', () => {
     const databaseUrl = createTempDatabaseUrl('thesis-db-relations-');
     const databasePath = path.resolve('/root/thesislab', databaseUrl.slice('file:'.length));
     const migrationPaths = [
-      path.resolve(import.meta.dirname, '../drizzle/0001_unknown_komodo.sql'),
-      path.resolve(import.meta.dirname, '../drizzle/0002_soft_tenebrous.sql'),
+      path.resolve(import.meta.dirname, '../drizzle/0000_domain_core.sql'),
     ];
 
     const seedSql = [
@@ -422,5 +421,18 @@ conn.close()
     `)).rejects.toThrow(/FOREIGN KEY constraint failed/);
 
     connection.sqlite.close();
+  });
+
+  it('records the claim evidence ordering migration in the Drizzle journal sequence', async () => {
+    const journalPath = path.resolve(import.meta.dirname, '../drizzle/meta/_journal.json');
+    const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8')) as {
+      entries?: Array<{ idx: number; tag: string }>;
+    };
+
+    expect(journal.entries).toEqual([
+      expect.objectContaining({ idx: 0, tag: '0000_domain_core' }),
+      expect.objectContaining({ idx: 1, tag: '0001_unknown_komodo' }),
+      expect.objectContaining({ idx: 2, tag: '0002_claim_evidence_ordering_json' }),
+    ]);
   });
 });
