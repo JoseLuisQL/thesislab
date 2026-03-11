@@ -453,6 +453,193 @@ describe('GET /zotero/*', () => {
       }),
     ]);
   });
+
+  it('persists thesis and chapter Zotero mappings, scopes mapping lists, refreshes metadata without changing local identity, and exposes degraded connector states', async () => {
+    const thesisAResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis Zotero A',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-zotero-a',
+      },
+    });
+    const thesisBResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis Zotero B',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-zotero-b',
+      },
+    });
+
+    const thesisAId = (thesisAResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const thesisBId = (thesisBResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisAId}/intake-jobs`,
+      payload: {
+        importRootPath: '/workspace/tmp/user-testing-intake-normalization/latex-project',
+      },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+    const intakeJobId = (intakeResponse.json() as { intakeJob: { id: string } }).intakeJob.id;
+    const nodesResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisAId}/intake-jobs/${intakeJobId}/nodes`,
+    });
+    const chapterNodeId = (nodesResponse.json() as { nodes: Array<{ id: string; nodeType: string }> }).nodes.find(
+      (node) => node.nodeType === 'chapter',
+    )?.id;
+
+    expect(chapterNodeId).toEqual(expect.any(String));
+
+    const thesisMappingResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisAId}/zotero-mappings`,
+      payload: {
+        scope: 'thesis',
+        libraryId: 'lib-user-main',
+        collectionKey: 'col-ml-core',
+        itemKey: 'item-traceability-2024',
+      },
+    });
+    const chapterMappingResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisAId}/zotero-mappings`,
+      payload: {
+        scope: 'chapter',
+        normalizedNodeId: chapterNodeId,
+        libraryId: 'lib-user-main',
+        collectionKey: 'col-ml-methods',
+        itemKey: 'item-methods-2023',
+      },
+    });
+    const thesisBMappingResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisBId}/zotero-mappings`,
+      payload: {
+        scope: 'thesis',
+        libraryId: 'lib-group-thesis-lab',
+        collectionKey: 'col-group-bibliography',
+        itemKey: 'item-group-citations-2022',
+      },
+    });
+
+    if (thesisMappingResponse.statusCode !== 201) {
+      throw new Error(`unexpected thesis mapping response: ${thesisMappingResponse.statusCode} ${thesisMappingResponse.body}`);
+    }
+    if (chapterMappingResponse.statusCode !== 201) {
+      throw new Error(`unexpected chapter mapping response: ${chapterMappingResponse.statusCode} ${chapterMappingResponse.body}`);
+    }
+    if (thesisBMappingResponse.statusCode !== 201) {
+      throw new Error(`unexpected thesis B mapping response: ${thesisBMappingResponse.statusCode} ${thesisBMappingResponse.body}`);
+    }
+    expect(chapterMappingResponse.statusCode).toBe(201);
+    expect(thesisBMappingResponse.statusCode).toBe(201);
+
+    const thesisMapping = (thesisMappingResponse.json() as { mapping: { id: string; scope: string; normalizedNodeId: string | null; normalizedData: { item: { key: string; title: string } } } }).mapping;
+    const chapterMapping = (chapterMappingResponse.json() as { mapping: { id: string; scope: string; normalizedNodeId: string | null; normalizedData: { item: { key: string; title: string } } } }).mapping;
+
+    expect(thesisMapping.scope).toBe('thesis');
+    expect(thesisMapping.normalizedNodeId).toBeNull();
+    expect(thesisMapping.normalizedData.item).toEqual(
+      expect.objectContaining({ key: 'item-traceability-2024', title: 'Traceable Evidence in AI Research' }),
+    );
+    expect(chapterMapping.scope).toBe('chapter');
+    expect(chapterMapping.normalizedNodeId).toBe(chapterNodeId);
+    expect(chapterMapping.normalizedData.item).toEqual(
+      expect.objectContaining({ key: 'item-methods-2023', title: 'Research Methods for Thesis Workflows' }),
+    );
+
+    const thesisScopedListResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisAId}/zotero-mappings`,
+    });
+    const chapterScopedListResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisAId}/zotero-mappings?scope=chapter&normalizedNodeId=${chapterNodeId}`,
+    });
+    const thesisBListResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisBId}/zotero-mappings`,
+    });
+
+    expect(thesisScopedListResponse.statusCode).toBe(200);
+    expect(chapterScopedListResponse.statusCode).toBe(200);
+    expect(thesisBListResponse.statusCode).toBe(200);
+
+    const thesisScopedMappings = (thesisScopedListResponse.json() as { mappings: Array<{ id: string; thesisId: string }> }).mappings;
+    const chapterScopedMappings = (chapterScopedListResponse.json() as { mappings: Array<{ id: string; normalizedNodeId: string | null }> }).mappings;
+    const thesisBMappings = (thesisBListResponse.json() as { mappings: Array<{ id: string }> }).mappings;
+
+    expect(thesisScopedMappings.map((mapping) => mapping.id)).toEqual([chapterMapping.id, thesisMapping.id]);
+    expect(thesisScopedMappings.every((mapping) => mapping.thesisId === thesisAId)).toBe(true);
+    expect(chapterScopedMappings).toEqual([
+      expect.objectContaining({ id: chapterMapping.id, normalizedNodeId: chapterNodeId }),
+    ]);
+    expect(thesisBMappings).toEqual([
+      expect.objectContaining({ id: (thesisBMappingResponse.json() as { mapping: { id: string } }).mapping.id }),
+    ]);
+
+    const refreshedMappingResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisAId}/zotero-mappings/${thesisMapping.id}/refresh`,
+      payload: {
+        itemKey: 'item-zotero-schema-2026',
+      },
+    });
+
+    expect(refreshedMappingResponse.statusCode).toBe(200);
+    const refreshedMapping = (refreshedMappingResponse.json() as { mapping: { id: string; thesisId: string; normalizedNodeId: string | null; normalizedData: { item: { key: string; title: string } }; connectorStatus: string; degraded: { isDegraded: boolean } } }).mapping;
+    expect(refreshedMapping.id).toBe(thesisMapping.id);
+    expect(refreshedMapping.thesisId).toBe(thesisAId);
+    expect(refreshedMapping.normalizedNodeId).toBeNull();
+    expect(refreshedMapping.connectorStatus).toBe('ready');
+    expect(refreshedMapping.degraded.isDegraded).toBe(false);
+    expect(refreshedMapping.normalizedData.item).toEqual(
+      expect.objectContaining({ key: 'item-zotero-schema-2026', title: 'Stable Zotero Normalization Schema' }),
+    );
+
+    const degradedMappingResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisAId}/zotero-mappings/${chapterMapping.id}/refresh`,
+      payload: {
+        itemKey: 'missing-item',
+      },
+    });
+
+    expect(degradedMappingResponse.statusCode).toBe(200);
+    const degradedMapping = (degradedMappingResponse.json() as { mapping: { id: string; normalizedNodeId: string | null; connectorStatus: string; degraded: { isDegraded: boolean; code: string | null; message: string | null }; normalizedData: { item: unknown; collection: { key: string } | null } } }).mapping;
+    expect(degradedMapping.id).toBe(chapterMapping.id);
+    expect(degradedMapping.normalizedNodeId).toBe(chapterNodeId);
+    expect(degradedMapping.connectorStatus).toBe('degraded');
+    expect(degradedMapping.degraded).toEqual({
+      isDegraded: true,
+      code: 'ZOTERO_CONNECTOR_RESOLUTION_FAILED',
+      message: 'Zotero connector could not resolve item for the requested mapping refresh.',
+    });
+    expect(degradedMapping.normalizedData.item).toBeNull();
+    expect(degradedMapping.normalizedData.collection).toEqual(expect.objectContaining({ key: 'col-ml-methods' }));
+
+    const mappingDetailResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisAId}/zotero-mappings/${chapterMapping.id}`,
+    });
+    expect(mappingDetailResponse.statusCode).toBe(200);
+    expect((mappingDetailResponse.json() as { mapping: { id: string; connectorStatus: string; degraded: { code: string | null } } }).mapping).toEqual(
+      expect.objectContaining({
+        id: chapterMapping.id,
+        connectorStatus: 'degraded',
+        degraded: expect.objectContaining({ code: 'ZOTERO_CONNECTOR_RESOLUTION_FAILED' }),
+      }),
+    );
+  });
 });
 
 describe('resolveRuntimeDatabaseUrl', () => {

@@ -15,6 +15,7 @@ import {
   type CreateFeedbackInput,
   type CreateEvidenceFragmentInput,
   type CreateIntakeJobInput,
+  type CreateZoteroMappingInput,
   type ListZoteroItemsInput,
   ClaimEvidenceScopeError,
   ClaimEvidenceLinkNotFoundError,
@@ -32,8 +33,10 @@ import {
   type LinkClaimEvidenceInput,
   SourceRegistrationConflictError,
   ThesisNotFoundError,
+  ZoteroMappingNotFoundError,
   createThesisLifecycleService,
   type LatexEditRequest,
+  type RefreshZoteroMappingInput,
   type TransitionThesisInput,
 } from './thesis.js';
 
@@ -157,6 +160,27 @@ const searchZoteroItemsSchema = listZoteroItemsSchema.extend({
   q: z.string().trim().min(1),
 });
 
+const zoteroMappingScopeSchema = z.enum(['thesis', 'chapter']);
+
+const createZoteroMappingSchema = z.object({
+  scope: zoteroMappingScopeSchema,
+  normalizedNodeId: z.string().trim().min(1).nullable().optional(),
+  libraryId: z.string().trim().min(1),
+  collectionKey: z.string().trim().min(1).nullable().optional(),
+  itemKey: z.string().trim().min(1).nullable().optional(),
+});
+
+const listZoteroMappingsSchema = z.object({
+  scope: zoteroMappingScopeSchema.optional(),
+  normalizedNodeId: z.string().trim().min(1).optional(),
+});
+
+const refreshZoteroMappingSchema = z.object({
+  libraryId: z.string().trim().min(1).optional(),
+  collectionKey: z.string().trim().min(1).nullable().optional(),
+  itemKey: z.string().trim().min(1).nullable().optional(),
+});
+
 export function resolveRuntimeDatabaseUrl() {
   const configuredDatabaseUrl = process.env.DATABASE_URL?.trim();
   const hostRepoRoot = process.env.HOST_REPO_ROOT?.trim();
@@ -231,6 +255,16 @@ export function createApp() {
         message: error.message,
         thesisId: error.thesisId,
         sourceId: error.sourceId,
+      });
+    }
+
+    if (error instanceof ZoteroMappingNotFoundError) {
+      return reply.status(404).send({
+        ok: false,
+        code: 'ZOTERO_MAPPING_NOT_FOUND',
+        message: error.message,
+        thesisId: error.thesisId,
+        mappingId: error.mappingId,
       });
     }
 
@@ -384,6 +418,50 @@ export function createApp() {
     });
 
     return { ok: true, items };
+  });
+
+  app.post('/theses/:thesisId/zotero-mappings', async (request, reply) => {
+    const payload = createZoteroMappingSchema.parse(request.body) as CreateZoteroMappingInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const mapping = await (await getThesisLifecycle()).service.createZoteroMapping(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, mapping });
+  });
+
+  app.get('/theses/:thesisId/zotero-mappings', async (request) => {
+    const query = listZoteroMappingsSchema.parse(request.query ?? {});
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const mappings = await (await getThesisLifecycle()).service.listZoteroMappings(
+      (request.params as { thesisId: string }).thesisId,
+      query.scope,
+      query.normalizedNodeId,
+    );
+
+    return { ok: true, mappings };
+  });
+
+  app.get('/theses/:thesisId/zotero-mappings/:mappingId', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; mappingId: string };
+    const mapping = await (await getThesisLifecycle()).service.getZoteroMapping(params.thesisId, params.mappingId);
+
+    return { ok: true, mapping };
+  });
+
+  app.post('/theses/:thesisId/zotero-mappings/:mappingId/refresh', async (request) => {
+    const payload = refreshZoteroMappingSchema.parse(request.body ?? {}) as RefreshZoteroMappingInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; mappingId: string };
+    const mapping = await (await getThesisLifecycle()).service.refreshZoteroMapping(
+      params.thesisId,
+      params.mappingId,
+      payload,
+    );
+
+    return { ok: true, mapping };
   });
 
   app.post('/theses', async (request, reply) => {

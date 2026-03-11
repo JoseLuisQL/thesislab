@@ -17,6 +17,7 @@ import {
   intakeJobs,
   normalizedNodes,
   sources,
+  zoteroMappings,
   type IntakeStatus,
   type SourceFormat,
   thesisStates,
@@ -765,6 +766,42 @@ export type SearchZoteroItemsInput = {
   collectionKey?: string | null;
 };
 
+export type ZoteroMappingScope = 'thesis' | 'chapter';
+
+export type ZoteroMappingPayload = {
+  id: string;
+  thesisId: string;
+  normalizedNodeId: string | null;
+  scope: ZoteroMappingScope;
+  libraryId: string;
+  collectionKey: string | null;
+  itemKey: string | null;
+  normalizedData: Record<string, unknown>;
+  connectorStatus: 'ready' | 'degraded';
+  degraded: {
+    isDegraded: boolean;
+    message: string | null;
+    code: string | null;
+  };
+  lastSyncedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateZoteroMappingInput = {
+  scope: ZoteroMappingScope;
+  normalizedNodeId?: string | null;
+  libraryId: string;
+  collectionKey?: string | null;
+  itemKey?: string | null;
+};
+
+export type RefreshZoteroMappingInput = {
+  libraryId?: string;
+  collectionKey?: string | null;
+  itemKey?: string | null;
+};
+
 export type RegisterSourceInput = {
   sourceType: 'book' | 'article' | 'web' | 'pdf' | 'note' | 'other';
   title: string;
@@ -945,6 +982,13 @@ export class LatexBuildNotReadyError extends Error {
   }
 }
 
+export class ZoteroMappingNotFoundError extends Error {
+  constructor(public readonly thesisId: string, public readonly mappingId: string) {
+    super(`Zotero mapping ${mappingId} was not found for thesis ${thesisId}.`);
+    this.name = 'ZoteroMappingNotFoundError';
+  }
+}
+
 export class ThesisLifecycleService {
   constructor(private readonly db: ThesisDbClient) {}
 
@@ -973,6 +1017,131 @@ export class ThesisLifecycleService {
       libraryKey: input.libraryKey ?? null,
       collectionKey: input.collectionKey ?? null,
     });
+  }
+
+  async createZoteroMapping(thesisId: string, input: CreateZoteroMappingInput): Promise<ZoteroMappingPayload> {
+    await this.requireThesis(thesisId);
+
+    if (input.scope === 'chapter') {
+      if (!input.normalizedNodeId) {
+        throw new EvidenceContextScopeError(thesisId, 'Chapter Zotero mappings require a chapter normalizedNodeId.');
+      }
+
+      const normalizedNode = await this.requireNormalizedNode(thesisId, input.normalizedNodeId);
+      if (normalizedNode.nodeType !== 'chapter') {
+        throw new EvidenceContextScopeError(
+          thesisId,
+          `Normalized node ${input.normalizedNodeId} must be a chapter to create a chapter Zotero mapping.`,
+        );
+      }
+    }
+
+    if (input.scope === 'thesis' && input.normalizedNodeId) {
+      throw new EvidenceContextScopeError(thesisId, 'Thesis Zotero mappings cannot target a chapter node.');
+    }
+
+    const connector = createZoteroMockConnector();
+    const now = new Date().toISOString();
+    const normalizedRecord = connector.resolveNormalizedMapping({
+      libraryId: input.libraryId,
+      collectionKey: input.collectionKey ?? null,
+      itemKey: input.itemKey ?? null,
+    });
+
+    const mappingId = randomUUID();
+    await this.db.insert(zoteroMappings).values({
+      id: mappingId,
+      thesisId,
+      normalizedNodeId: input.scope === 'chapter' ? input.normalizedNodeId ?? null : null,
+      sourceId: null,
+      scope: input.scope,
+      libraryId: input.libraryId,
+      collectionKey: input.collectionKey ?? null,
+      itemKey: input.itemKey ?? null,
+      normalizedDataJson: JSON.stringify(normalizedRecord.normalizedData),
+      connectorStatus: normalizeZoteroConnectorStatus(normalizedRecord.connectorStatus),
+      lastSyncedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    return this.getZoteroMapping(thesisId, mappingId);
+  }
+
+  async listZoteroMappings(thesisId: string, scope?: ZoteroMappingScope, normalizedNodeId?: string | null): Promise<ZoteroMappingPayload[]> {
+    await this.requireThesis(thesisId);
+
+    if (normalizedNodeId) {
+      await this.requireNormalizedNode(thesisId, normalizedNodeId);
+    }
+
+    const rows = await this.db
+      .select()
+      .from(zoteroMappings)
+      .where(eq(zoteroMappings.thesisId, thesisId))
+      .orderBy(desc(zoteroMappings.lastSyncedAt), asc(zoteroMappings.id))
+      .all();
+
+    return rows
+      .filter((row) => {
+        if (row.sourceId !== null) {
+          return false;
+        }
+
+        if (scope && row.scope !== scope) {
+          return false;
+        }
+
+        if (normalizedNodeId !== undefined) {
+          return row.normalizedNodeId === normalizedNodeId;
+        }
+
+        return true;
+      })
+      .map((row) => this.mapZoteroMappingRecord(row));
+  }
+
+  async getZoteroMapping(thesisId: string, mappingId: string): Promise<ZoteroMappingPayload> {
+    await this.requireThesis(thesisId);
+    const row = await this.db.query.zoteroMappings.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, mappingId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!row || row.sourceId !== null || (row.scope !== 'thesis' && row.scope !== 'chapter')) {
+      throw new ZoteroMappingNotFoundError(thesisId, mappingId);
+    }
+
+    return this.mapZoteroMappingRecord(row);
+  }
+
+  async refreshZoteroMapping(thesisId: string, mappingId: string, input: RefreshZoteroMappingInput = {}): Promise<ZoteroMappingPayload> {
+    const existing = await this.getZoteroMapping(thesisId, mappingId);
+    const connector = createZoteroMockConnector();
+    const now = new Date().toISOString();
+    const libraryId = input.libraryId ?? existing.libraryId;
+    const collectionKey = input.collectionKey === undefined ? existing.collectionKey : input.collectionKey;
+    const itemKey = input.itemKey === undefined ? existing.itemKey : input.itemKey;
+    const normalizedRecord = connector.resolveNormalizedMapping({
+      libraryId,
+      collectionKey,
+      itemKey,
+    });
+
+    await this.db
+      .update(zoteroMappings)
+      .set({
+        libraryId,
+        collectionKey,
+        itemKey,
+        normalizedDataJson: JSON.stringify(normalizedRecord.normalizedData),
+        connectorStatus: normalizeZoteroConnectorStatus(normalizedRecord.connectorStatus),
+        lastSyncedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(zoteroMappings.id, mappingId));
+
+    return this.getZoteroMapping(thesisId, mappingId);
   }
 
   async createThesis(input: CreateThesisInput): Promise<ThesisDetailPayload> {
@@ -2849,6 +3018,32 @@ export class ThesisLifecycleService {
       updatedAt: record.updatedAt,
     };
   }
+
+  private mapZoteroMappingRecord(record: typeof zoteroMappings.$inferSelect): ZoteroMappingPayload {
+    const normalizedData = parseJsonObject(record.normalizedDataJson) ?? {};
+    const degradedMessage = typeof normalizedData.connectorMessage === 'string' ? normalizedData.connectorMessage : null;
+    const degradedCode = typeof normalizedData.connectorCode === 'string' ? normalizedData.connectorCode : null;
+
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      normalizedNodeId: record.normalizedNodeId,
+      scope: record.scope as ZoteroMappingScope,
+      libraryId: record.libraryId,
+      collectionKey: record.collectionKey,
+      itemKey: record.itemKey,
+      normalizedData,
+      connectorStatus: record.connectorStatus === 'ready' ? 'ready' : 'degraded',
+      degraded: {
+        isDegraded: record.connectorStatus !== 'ready',
+        message: degradedMessage,
+        code: degradedCode,
+      },
+      lastSyncedAt: record.lastSyncedAt,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
 }
 
 export function createThesisLifecycleService(databaseUrl?: string) {
@@ -3228,6 +3423,10 @@ function resolveZoteroConnectorMode(): ZoteroConnectorMode {
   }
 }
 
+function normalizeZoteroConnectorStatus(value: string): 'ready' | 'degraded' {
+  return value === 'ready' ? 'ready' : 'degraded';
+}
+
 function createZoteroMockConnector() {
   const mode = resolveZoteroConnectorMode();
   const dataset = DEFAULT_ZOTERO_DATASET;
@@ -3328,6 +3527,46 @@ function createZoteroMockConnector() {
         .slice()
         .sort((left, right) => left.title.localeCompare(right.title) || left.key.localeCompare(right.key))
         .map(mapItem);
+    },
+
+    resolveNormalizedMapping(filter: { libraryId: string; collectionKey?: string | null; itemKey?: string | null }) {
+      const library = dataset.libraries.find((entry) => entry.key === filter.libraryId) ?? null;
+      const collection = filter.collectionKey
+        ? dataset.collections.find((entry) => entry.key === filter.collectionKey && entry.libraryKey === filter.libraryId) ?? null
+        : null;
+      const item = filter.itemKey
+        ? dataset.items.find((entry) => entry.key === filter.itemKey && entry.libraryKey === filter.libraryId) ?? null
+        : null;
+
+      const missingParts = [
+        library ? null : 'library',
+        filter.collectionKey && !collection ? 'collection' : null,
+        filter.itemKey && !item ? 'item' : null,
+      ].filter((value): value is string => value !== null);
+
+      if (missingParts.length > 0) {
+        return {
+        connectorStatus: 'degraded' as const,
+          normalizedData: {
+            library: library ? mapLibrary(library) : null,
+            collection: collection ? mapCollection(collection) : null,
+            item: item ? mapItem(item) : null,
+            connectorMessage: `Zotero connector could not resolve ${missingParts.join(', ')} for the requested mapping refresh.`,
+            connectorCode: 'ZOTERO_CONNECTOR_RESOLUTION_FAILED',
+          },
+        };
+      }
+
+      return {
+        connectorStatus: 'ready' as const,
+        normalizedData: {
+          library: library ? mapLibrary(library) : null,
+          collection: collection ? mapCollection(collection) : null,
+          item: item ? mapItem(item) : null,
+          connectorMessage: null,
+          connectorCode: null,
+        },
+      };
     },
   };
 }
