@@ -1,0 +1,22 @@
+{
+  "name": "@thesis-research-os/zotero-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js",
+      "default": "./dist/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "tsc --noEmit -p tsconfig.json --moduleResolution node16 --module node16",
+    "typecheck": "tsc --noEmit -p tsconfig.json --moduleResolution node16 --module node16"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2"
+  }
+}

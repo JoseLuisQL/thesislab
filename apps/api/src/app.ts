@@ -1052,6 +1052,55 @@ export function createApp() {
     return { ok: true, buildRun };
   });
 
+  // --- DOI Resolution ---
+
+  app.get('/resolve-doi', async (request, reply) => {
+    const { doi } = request.query as { doi?: string };
+    if (!doi) {
+      return reply.status(400).send({ ok: false, error: 'Missing required "doi" query parameter.' });
+    }
+
+    // Dynamic import to avoid module resolution issues at startup
+    const { resolveDoi } = await import('@thesis-research-os/research-engine');
+    const mailto = process.env.CROSSREF_MAILTO;
+    const result = await resolveDoi(doi, mailto);
+
+    if (!result.ok) {
+      return reply.status(result.statusCode === 404 ? 404 : 502).send({ ok: false, error: result.error });
+    }
+
+    return { ok: true, metadata: result.metadata };
+  });
+
+  app.post('/theses/:thesisId/sources/from-doi', async (request, reply) => {
+    const { thesisId } = request.params as { thesisId: string };
+    const { doi } = request.body as { doi?: string };
+
+    if (!doi) {
+      return reply.status(400).send({ ok: false, error: 'Missing required "doi" field in request body.' });
+    }
+
+    const { resolveDoi } = await import('@thesis-research-os/research-engine');
+    const mailto = process.env.CROSSREF_MAILTO;
+    const result = await resolveDoi(doi, mailto);
+
+    if (!result.ok) {
+      return reply.status(502).send({ ok: false, error: result.error });
+    }
+
+    const meta = result.metadata;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const source = await (await getThesisLifecycle()).service.registerSource(thesisId, {
+      sourceType: meta.type === 'journal-article' ? 'article' : meta.type === 'book' ? 'book' : 'other',
+      title: meta.title,
+      authors: meta.authors,
+      publicationYear: meta.publicationYear,
+      locator: meta.url,
+    });
+
+    return reply.status(201).send({ ok: true, source, crossref: meta });
+  });
+
   return app;
 }
 

@@ -1,0 +1,21 @@
+{
+  "version": "0.1.0",
+  "private": true,
+  "exports": {
+    ".": {
+      "default": "./dist/src/index.js",
+      "import": "./dist/src/index.js",
+      "types": "./dist/src/index.d.ts"
+    }
+  },
+  "type": "module",
+  "name": "@thesis-research-os/research-engine",
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "tsc --noEmit -p tsconfig.json --moduleResolution node16 --module node16",
+    "typecheck": "tsc --noEmit -p tsconfig.json --moduleResolution node16 --module node16"
+  }
+}

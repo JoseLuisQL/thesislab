@@ -1,0 +1,24 @@
+{
+  "kind": "latex-edit",
+  "version": 1,
+  "thesisId": "584b76b1-d8dd-4878-a5ea-2309bafa39be",
+  "workspacePath": "C:\\Users\\jquis\\AppData\\Local\\Temp\\latex-edit-restore-0W0Mww\\latex-project",
+  "intakeJobId": "2869d866-cc93-49b1-8bbc-c29d45a93c27",
+  "checkpointId": "5e7dc81a-bbe6-408e-b912-68096d2e2ecf",
+  "createdAt": "2026-03-11T18:06:10.798Z",
+  "target": {
+    "normalizedNodeId": "latex:sections\\intro.tex:section:1:introduction",
+    "sourcePath": "sections\\intro.tex",
+    "title": "Introduction",
+    "nodeType": "section",
+    "startLine": 1,
+    "endLine": 1
+  },
+  "files": [
+    {
+      "relativePath": "sections\\intro.tex",
+      "content": "\\section{Introduction}\nOriginal intro body.\n\\subsection{Context}\nOriginal context body.\n",
+      "sha256": "eb002a7747dfcedd3552d9043b5c9b1827cbfabafcb188233cfd69aee682ec9b"
+    }
+  ]
+}
