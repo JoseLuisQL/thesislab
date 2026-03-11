@@ -568,6 +568,45 @@ export function createApp() {
     return { ok: true, items };
   });
 
+  // --- Zotero BibTeX Export ---
+
+  app.post('/theses/:thesisId/zotero/export-bib', async (request, reply) => {
+    const { thesisId } = request.params as { thesisId: string };
+    const body = (request.body ?? {}) as { libraryKey?: string; collectionKey?: string; filename?: string };
+    const filename = body.filename?.trim() || 'references.bib';
+
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const detail = await (await getThesisLifecycle()).service.getThesisDetail(thesisId);
+
+    // Fetch items from Zotero connector
+    const items = await (await getThesisLifecycle()).service.listZoteroItems({
+      libraryKey: body.libraryKey,
+      collectionKey: body.collectionKey,
+    });
+
+    // Convert to BibTeX
+    const { exportCollectionToBibtex } = await import('@thesis-research-os/zotero-bridge');
+    const bibContent = exportCollectionToBibtex(items);
+
+    // Write to workspace if thesis has one
+    let writtenTo: string | null = null;
+
+    if (detail.thesis.workspacePath) {
+      const bibPath = path.join(detail.thesis.workspacePath, filename);
+      fs.mkdirSync(path.dirname(bibPath), { recursive: true });
+      fs.writeFileSync(bibPath, bibContent, 'utf8');
+      writtenTo = bibPath;
+    }
+
+    return reply.status(201).send({
+      ok: true,
+      itemCount: items.length,
+      filename,
+      writtenTo,
+      bibContent,
+    });
+  });
+
   app.get('/policy-profiles/active', async () => {
     process.env.DATABASE_URL = testDatabaseUrl;
     const policyProfile = await (await getThesisLifecycle()).service.getActivePolicyProfile();

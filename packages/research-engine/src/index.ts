@@ -75,6 +75,7 @@ export function computeSourceSignature(title: string, sourceType: string, locato
 // --- Crossref / DOI re-exports ---
 
 export { resolveDoi, type CrossrefMetadata, type DoiResolutionResult } from './crossref.js';
+export { parseBibtexFile, type BibtexEntry } from './bibtex-parser.js';
 
 // --- Research Adapter (browser research interface) ---
 

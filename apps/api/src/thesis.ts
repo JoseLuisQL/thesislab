@@ -606,7 +606,7 @@ type SourceIngestStatus = 'not_started' | 'queued' | 'succeeded' | 'degraded' | 
 type SourceDuplicateState = 'unique' | 'duplicate';
 type PdfExtractionStatus = 'not_attempted' | 'succeeded' | 'degraded' | 'failed';
 
-type ZoteroConnectorMode = 'mock' | 'test' | 'live';
+type ZoteroConnectorMode = 'mock' | 'test' | 'live' | 'local';
 
 export type ZoteroLibraryPayload = {
   id: string;
@@ -1265,17 +1265,20 @@ export class ThesisLifecycleService {
   constructor(private readonly db: ThesisDbClient) {}
 
   async listZoteroLibraries(): Promise<ZoteroLibraryPayload[]> {
-    const connector = createZoteroMockConnector();
+    const { createZoteroConnector } = await import('@thesis-research-os/zotero-bridge');
+    const connector = createZoteroConnector();
     return connector.listLibraries();
   }
 
   async listZoteroCollections(libraryKey?: string | null): Promise<ZoteroCollectionPayload[]> {
-    const connector = createZoteroMockConnector();
+    const { createZoteroConnector } = await import('@thesis-research-os/zotero-bridge');
+    const connector = createZoteroConnector();
     return connector.listCollections({ libraryKey: libraryKey ?? null });
   }
 
   async listZoteroItems(input: ListZoteroItemsInput = {}): Promise<ZoteroItemPayload[]> {
-    const connector = createZoteroMockConnector();
+    const { createZoteroConnector } = await import('@thesis-research-os/zotero-bridge');
+    const connector = createZoteroConnector();
     return connector.listItems({
       libraryKey: input.libraryKey ?? null,
       collectionKey: input.collectionKey ?? null,
@@ -1283,7 +1286,8 @@ export class ThesisLifecycleService {
   }
 
   async searchZoteroItems(input: SearchZoteroItemsInput): Promise<ZoteroItemPayload[]> {
-    const connector = createZoteroMockConnector();
+    const { createZoteroConnector } = await import('@thesis-research-os/zotero-bridge');
+    const connector = createZoteroConnector();
     return connector.searchItems({
       query: input.query,
       libraryKey: input.libraryKey ?? null,
@@ -2652,14 +2656,50 @@ export class ThesisLifecycleService {
   async registerSource(thesisId: string, input: RegisterSourceInput): Promise<{ source: SourcePayload; duplicate: boolean }> {
     await this.requireThesis(thesisId);
 
-    const normalizedAuthors = normalizeAuthors(input.authors ?? []);
+    // --- 5.3: Crossref auto-enrichment ---
+    // If locator looks like a DOI, resolve metadata and fill in missing fields
+    let enrichedInput = { ...input };
+    const locator = input.locator?.trim() ?? '';
+    const doiMatch = locator.match(/(?:https?:\/\/doi\.org\/|^)(10\.\d{4,}\/\S+)/i);
+    if (doiMatch) {
+      try {
+        const { resolveDoi } = await import('@thesis-research-os/research-engine');
+        const mailto = process.env.CROSSREF_MAILTO;
+        const result = await resolveDoi(doiMatch[1]!, mailto);
+        if (result.ok) {
+          const meta = result.metadata;
+          // Fill in missing fields from Crossref
+          if (!enrichedInput.title || enrichedInput.title === 'Untitled') {
+            enrichedInput = { ...enrichedInput, title: meta.title };
+          }
+          if (!enrichedInput.authors || enrichedInput.authors.length === 0) {
+            enrichedInput = { ...enrichedInput, authors: meta.authors };
+          }
+          if (enrichedInput.publicationYear == null && meta.publicationYear != null) {
+            enrichedInput = { ...enrichedInput, publicationYear: meta.publicationYear };
+          }
+          // Map Crossref type to source type
+          if (enrichedInput.sourceType === 'other') {
+            const typeMap: Record<string, RegisterSourceInput['sourceType']> = {
+              'journal-article': 'article', 'book': 'book', 'book-chapter': 'book',
+              'proceedings-article': 'article', 'posted-content': 'article',
+            };
+            enrichedInput = { ...enrichedInput, sourceType: typeMap[meta.type] ?? enrichedInput.sourceType };
+          }
+        }
+      } catch {
+        // Non-blocking: Crossref enrichment failure doesn't prevent registration
+      }
+    }
+
+    const normalizedAuthors = normalizeAuthors(enrichedInput.authors ?? []);
     const signature = createSourceSignature({
       thesisId,
-      sourceType: input.sourceType,
-      title: input.title,
+      sourceType: enrichedInput.sourceType,
+      title: enrichedInput.title,
       authors: normalizedAuthors,
-      publicationYear: input.publicationYear ?? null,
-      locator: input.locator ?? null,
+      publicationYear: enrichedInput.publicationYear ?? null,
+      locator: enrichedInput.locator ?? null,
     });
 
     const existingRows = await this.db
@@ -2679,24 +2719,51 @@ export class ThesisLifecycleService {
       return { source, duplicate: true };
     }
 
+    // --- 5.2: Auto PDF text extraction ---
+    let autoIngest = enrichedInput.ingest;
+    if (enrichedInput.sourceType === 'pdf' && enrichedInput.locator && !enrichedInput.ingest?.pdfText) {
+      try {
+        const locatorPath = enrichedInput.locator;
+        if (fs.existsSync(locatorPath)) {
+          const buffer = fs.readFileSync(locatorPath);
+          const { extractPdfText } = await import('@thesis-research-os/pdf-evidence-extractor');
+          const extracted = await extractPdfText(buffer);
+          autoIngest = {
+            ...(autoIngest ?? {}),
+            ingestStatus: 'succeeded' as const,
+            pdfText: extracted.text,
+            pdfMetadata: { numPages: extracted.numPages, ...extracted.metadata },
+          };
+        }
+      } catch {
+        // Non-blocking: PDF extraction failure sets degraded status
+        autoIngest = {
+          ...(autoIngest ?? {}),
+          ingestStatus: 'degraded' as const,
+          pdfText: null,
+          pdfMetadata: null,
+        };
+      }
+    }
+
     const now = new Date().toISOString();
     const id = randomUUID();
     const ingestMetadata = buildSourceIngestMetadata({
-      sourceType: input.sourceType,
-      title: input.title,
-      locator: input.locator ?? null,
-      ingest: input.ingest,
+      sourceType: enrichedInput.sourceType,
+      title: enrichedInput.title,
+      locator: enrichedInput.locator ?? null,
+      ingest: autoIngest,
       signature,
     });
 
     await this.db.insert(sources).values({
       id,
       thesisId,
-      sourceType: input.sourceType,
-      title: input.title.trim(),
+      sourceType: enrichedInput.sourceType,
+      title: enrichedInput.title.trim(),
       authorsJson: JSON.stringify(normalizedAuthors),
-      publicationYear: input.publicationYear ?? null,
-      locator: input.locator ?? null,
+      publicationYear: enrichedInput.publicationYear ?? null,
+      locator: enrichedInput.locator ?? null,
       status: deriveSourceStatus(ingestMetadata),
       ingestMetadataJson: JSON.stringify(ingestMetadata),
       createdAt: now,
@@ -5092,6 +5159,7 @@ function resolveZoteroConnectorMode(): ZoteroConnectorMode {
     case 'mock':
     case 'test':
     case 'live':
+    case 'local':
       return configuredMode;
     default:
       return DEFAULT_ZOTERO_CONNECTOR_MODE;

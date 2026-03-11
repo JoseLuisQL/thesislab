@@ -103,10 +103,12 @@ export function buildLocalFirstStatusPayload(options: LocalFirstStatusOptions = 
   const integrationDefaults: Record<IntegrationKey, IntegrationStatusSnapshot> = {
     zotero: {
       key: 'zotero',
-      state: zoteroMode === 'live' && zoteroApiKey ? 'available' : 'degraded',
-      summary: zoteroMode === 'live' && zoteroApiKey ? 'Live connector active' : zoteroMode === 'mock' ? 'Mock connector only' : 'Connector not fully attached',
+      state: (zoteroMode === 'live' && zoteroApiKey) || zoteroMode === 'local' ? 'available' : 'degraded',
+      summary: zoteroMode === 'local' ? 'Connected to Zotero desktop' : zoteroMode === 'live' && zoteroApiKey ? 'Live connector active' : zoteroMode === 'mock' ? 'Mock connector only' : 'Connector not fully attached',
       detail:
-        zoteroMode === 'live' && zoteroApiKey
+        zoteroMode === 'local'
+          ? 'Zotero connector is using the local desktop API at localhost:23119. No API key needed.'
+          : zoteroMode === 'live' && zoteroApiKey
           ? 'Zotero connector is using the live Web API v3 with your API key.'
           : zoteroMode === 'mock'
           ? 'Zotero runs in mock mode, so local workflows remain usable while bibliography sync is explicitly degraded.'

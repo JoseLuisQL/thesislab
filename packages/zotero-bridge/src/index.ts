@@ -1,6 +1,8 @@
 // zotero-bridge — Zotero connector types, mock dataset, and mapping operations
+import { ZoteroLocalClient } from './local-client.js';
+import { ZoteroHttpClient } from './client.js';
 
-export type ZoteroConnectorMode = 'mock' | 'test' | 'live';
+export type ZoteroConnectorMode = 'mock' | 'test' | 'live' | 'local';
 export type ZoteroMappingScope = 'thesis' | 'chapter' | 'source';
 
 export type ZoteroLibraryPayload = {
@@ -224,6 +226,7 @@ export function resolveZoteroConnectorMode(): ZoteroConnectorMode {
     case 'mock':
     case 'test':
     case 'live':
+    case 'local':
       return envMode;
     default:
       return DEFAULT_ZOTERO_CONNECTOR_MODE;
@@ -233,6 +236,8 @@ export function resolveZoteroConnectorMode(): ZoteroConnectorMode {
 // --- Client re-exports ---
 
 export { ZoteroHttpClient, ZoteroApiError, type ZoteroClientConfig } from './client.js';
+export { zoteroItemToBibtex, exportCollectionToBibtex } from './bibtex.js';
+export { ZoteroLocalClient, type ZoteroLocalConfig } from './local-client.js';
 
 // --- Connector factory ---
 
@@ -249,8 +254,20 @@ export function createZoteroConnector(): ZoteroConnector {
   const apiKey = (typeof process !== 'undefined' ? process.env?.ZOTERO_API_KEY : undefined)?.trim();
   const userId = (typeof process !== 'undefined' ? process.env?.ZOTERO_USER_ID : undefined)?.trim();
 
+  // Local mode: connect to desktop Zotero at localhost:23119
+  if (mode === 'local') {
+    const localUrl = (typeof process !== 'undefined' ? process.env?.ZOTERO_LOCAL_URL : undefined)?.trim();
+    const client = new ZoteroLocalClient({ baseUrl: localUrl, mode });
+    return {
+      mode,
+      listLibraries: () => client.listLibraries(),
+      listCollections: (filter) => client.listCollections(filter),
+      listItems: (filter) => client.listItems(filter),
+      searchItems: (filter) => client.searchItems(filter),
+    };
+  }
+
   if (mode === 'live' && apiKey && userId) {
-    const { ZoteroHttpClient } = require('./client.js') as typeof import('./client.js');
     const client = new ZoteroHttpClient({ apiKey, userId, mode });
     return {
       mode,
