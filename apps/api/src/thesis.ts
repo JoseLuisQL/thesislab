@@ -473,6 +473,38 @@ export type CreateFeedbackInput = {
   recordedAt?: string;
 };
 
+export type WorkflowTaskPayload = {
+  id: string;
+  thesisId: string;
+  parentTaskId: string | null;
+  title: string;
+  intent: string;
+  status: string;
+  priority: number;
+  sortOrder: number;
+  dueAt: string | null;
+  activeCheckpointId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateWorkflowTaskInput = {
+  parentTaskId?: string | null;
+  title: string;
+  intent: string;
+  status?: string;
+  priority?: number;
+  sortOrder?: number;
+  dueAt?: string | null;
+};
+
+export type EvidenceContextSetupPayload = {
+  thesisId: string;
+  activeImportId: string | null;
+  normalizedNodes: NormalizedNodePayload[];
+  tasks: WorkflowTaskPayload[];
+};
+
 type SourceIngestStatus = 'not_started' | 'queued' | 'succeeded' | 'degraded' | 'failed';
 type SourceDuplicateState = 'unique' | 'duplicate';
 type PdfExtractionStatus = 'not_attempted' | 'succeeded' | 'degraded' | 'failed';
@@ -1338,6 +1370,64 @@ export class ThesisLifecycleService {
       createdAt: recordedAt,
       updatedAt: recordedAt,
     });
+  }
+
+  async createWorkflowTask(thesisId: string, input: CreateWorkflowTaskInput): Promise<WorkflowTaskPayload> {
+    await this.requireThesis(thesisId);
+
+    if (input.parentTaskId) {
+      await this.requireWorkflowTask(thesisId, input.parentTaskId);
+    }
+
+    const now = new Date().toISOString();
+    const id = randomUUID();
+
+    await this.db.insert(workflowTasks).values({
+      id,
+      thesisId,
+      parentTaskId: input.parentTaskId ?? null,
+      title: input.title.trim(),
+      intent: input.intent.trim(),
+      status: input.status?.trim() || 'pending',
+      priority: input.priority ?? 0,
+      sortOrder: input.sortOrder ?? 0,
+      dueAt: input.dueAt ?? null,
+      activeCheckpointId: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    return this.getWorkflowTask(thesisId, id);
+  }
+
+  async listWorkflowTasks(thesisId: string): Promise<WorkflowTaskPayload[]> {
+    await this.requireThesis(thesisId);
+
+    const rows = await this.db
+      .select()
+      .from(workflowTasks)
+      .where(eq(workflowTasks.thesisId, thesisId))
+      .orderBy(asc(workflowTasks.sortOrder), desc(workflowTasks.priority), asc(workflowTasks.createdAt), asc(workflowTasks.id))
+      .all();
+
+    return rows.map((row) => this.mapWorkflowTaskRecord(row));
+  }
+
+  async getWorkflowTask(thesisId: string, taskId: string): Promise<WorkflowTaskPayload> {
+    await this.requireThesis(thesisId);
+    const row = await this.requireWorkflowTask(thesisId, taskId);
+    return this.mapWorkflowTaskRecord(row);
+  }
+
+  async getEvidenceContextSetup(thesisId: string): Promise<EvidenceContextSetupPayload> {
+    const thesis = await this.requireThesis(thesisId);
+
+    return {
+      thesisId,
+      activeImportId: thesis.activeImportId,
+      normalizedNodes: thesis.activeImportId ? await this.listNormalizedNodes(thesisId, thesis.activeImportId) : [],
+      tasks: await this.listWorkflowTasks(thesisId),
+    };
   }
 
   async listFeedback(thesisId: string): Promise<ThesisFeedbackPayload[]> {
@@ -2264,6 +2354,23 @@ export class ThesisLifecycleService {
     return {
       ...record,
       sourceType: normalizeFeedbackSource(record.sourceType),
+    };
+  }
+
+  private mapWorkflowTaskRecord(record: typeof workflowTasks.$inferSelect): WorkflowTaskPayload {
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      parentTaskId: record.parentTaskId,
+      title: record.title,
+      intent: record.intent,
+      status: record.status,
+      priority: record.priority,
+      sortOrder: record.sortOrder,
+      dueAt: record.dueAt,
+      activeCheckpointId: record.activeCheckpointId,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
     };
   }
 

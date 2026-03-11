@@ -9,6 +9,7 @@ import { getDatabaseFilePath, runMigrations } from '@thesis-research-os/db';
 
 import { buildLocalFirstStatusPayload } from './status.js';
 import {
+  type CreateWorkflowTaskInput,
   type CreateCheckpointInput,
   type CreateClaimInput,
   type CreateFeedbackInput,
@@ -73,6 +74,16 @@ const createFeedbackSchema = z.object({
   recordedAt: z.string().datetime().optional(),
 });
 
+const createWorkflowTaskSchema = z.object({
+  parentTaskId: z.string().trim().min(1).nullable().optional(),
+  title: z.string().trim().min(1),
+  intent: z.string().trim().min(1),
+  status: z.string().trim().min(1).optional(),
+  priority: z.number().int().optional(),
+  sortOrder: z.number().int().optional(),
+  dueAt: z.string().datetime().nullable().optional(),
+});
+
 const registerSourceSchema = z.object({
   sourceType: z.enum(['book', 'article', 'web', 'pdf', 'note', 'other']),
   title: z.string().trim().min(1),
@@ -134,6 +145,8 @@ const latexBuildSchema = z.object({
 
 export function resolveRuntimeDatabaseUrl() {
   const configuredDatabaseUrl = process.env.DATABASE_URL?.trim();
+  const hostRepoRoot = process.env.HOST_REPO_ROOT?.trim();
+  const runtimeDatabaseUrl = `file:${path.resolve(process.cwd(), 'data', 'thesis-research-os.sqlite')}`;
 
   if (configuredDatabaseUrl) {
     return configuredDatabaseUrl;
@@ -141,19 +154,21 @@ export function resolveRuntimeDatabaseUrl() {
 
   const runtimeRelativeDefault = path.resolve(process.cwd(), 'data', 'thesis-research-os.sqlite');
   const packageDefault = getDatabaseFilePath();
+  const packageDefaultUrl = `file:${packageDefault}`;
+
+  if (hostRepoRoot) {
+    const hostRepoDataPath = path.resolve(hostRepoRoot, 'data', 'thesis-research-os.sqlite');
+
+    if (runtimeRelativeDefault === hostRepoDataPath) {
+      return packageDefaultUrl;
+    }
+  }
 
   if (runtimeRelativeDefault === packageDefault) {
-    return `file:${runtimeRelativeDefault}`;
+    return packageDefaultUrl;
   }
 
-  const hostRepoRoot = process.env.HOST_REPO_ROOT?.trim();
-  const hostRepoDataPath = hostRepoRoot ? path.resolve(hostRepoRoot, 'data', 'thesis-research-os.sqlite') : null;
-
-  if (hostRepoDataPath && runtimeRelativeDefault === hostRepoDataPath) {
-    return `file:${packageDefault}`;
-  }
-
-  return 'file:./data/thesis-research-os.sqlite';
+  return runtimeDatabaseUrl;
 }
 
 export function createApp() {
@@ -399,6 +414,35 @@ export function createApp() {
     );
 
     return { ok: true, feedback };
+  });
+
+  app.post('/theses/:thesisId/tasks', async (request, reply) => {
+    const payload = createWorkflowTaskSchema.parse(request.body) as CreateWorkflowTaskInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const task = await (await getThesisLifecycle()).service.createWorkflowTask(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, task });
+  });
+
+  app.get('/theses/:thesisId/tasks', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const tasks = await (await getThesisLifecycle()).service.listWorkflowTasks(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, tasks };
+  });
+
+  app.get('/theses/:thesisId/evidence-context-setup', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const setup = await (await getThesisLifecycle()).service.getEvidenceContextSetup(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, setup };
   });
 
   app.post('/theses/:thesisId/sources', async (request, reply) => {

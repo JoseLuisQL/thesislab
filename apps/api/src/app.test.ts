@@ -992,45 +992,62 @@ describe('thesis lifecycle registry routes', () => {
     });
 
     const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
-    const dbUrl = process.env.DATABASE_URL as string;
-    const connection = createDatabaseConnection(dbUrl);
-    const now = '2026-03-11T00:00:00.000Z';
 
-    try {
-      await connection.db.insert((await import('@thesis-research-os/db')).workflowTasks).values({
-        id: 'task-evidence-1',
-        thesisId,
-        parentTaskId: null,
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: {
+        importRootPath: '/workspace/tmp/user-testing-intake-normalization/latex-project',
+      },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const intakeJobId = (intakeResponse.json() as { intakeJob: { id: string } }).intakeJob.id;
+
+    const taskResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/tasks`,
+      payload: {
         title: 'Relacionar evidencia',
         intent: 'Conectar evidencia con la sección correcta',
         status: 'in_progress',
         priority: 1,
         sortOrder: 1,
-        dueAt: null,
-        activeCheckpointId: null,
-        createdAt: now,
-        updatedAt: now,
-      });
-      await connection.db.insert((await import('@thesis-research-os/db')).normalizedNodes).values({
-        id: 'node-evidence-1',
-        thesisId,
-        intakeJobId: null,
-        parentNodeId: null,
-        nodeType: 'section',
-        title: 'Marco teórico',
-        content: 'Contenido',
-        ordinal: 1,
-        sourcePath: 'main.tex',
-        sourceStart: '12',
-        sourceEnd: '24',
-        provenanceKind: 'latex',
-        provenanceJson: JSON.stringify({ filePath: 'main.tex', lineStart: 12, lineEnd: 24 }),
-        createdAt: now,
-        updatedAt: now,
-      });
-    } finally {
-      connection.sqlite.close();
-    }
+      },
+    });
+
+    expect(taskResponse.statusCode).toBe(201);
+
+    const createdTask = taskResponse.json() as { task: { id: string; title: string; status: string } };
+
+    const nodesResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/intake-jobs/${intakeJobId}/nodes`,
+    });
+
+    expect(nodesResponse.statusCode).toBe(200);
+
+    const normalizedNodeId = ((nodesResponse.json() as { nodes: Array<{ id: string; nodeType: string; title: string | null }> }).nodes.find(
+      (node) => node.nodeType === 'section',
+    )?.id);
+
+    expect(normalizedNodeId).toEqual(expect.any(String));
+
+    const setupResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/evidence-context-setup`,
+    });
+
+    expect(setupResponse.statusCode).toBe(200);
+    const setupPayload = (setupResponse.json() as {
+      setup: { thesisId: string; activeImportId: string | null; normalizedNodes: Array<{ id: string }>; tasks: Array<{ id: string }> };
+    }).setup;
+
+    expect(setupPayload.thesisId).toBe(thesisId);
+    expect(setupPayload.activeImportId).toBe(intakeJobId);
+    expect(setupPayload.normalizedNodes).toContainEqual(expect.objectContaining({ id: normalizedNodeId }));
+    expect(setupPayload.tasks).toContainEqual(expect.objectContaining({ id: createdTask.task.id }));
 
     const sourceResponse = await app.inject({
       method: 'POST',
@@ -1059,8 +1076,8 @@ describe('thesis lifecycle registry routes', () => {
           boundingBox: [10, 20, 200, 80],
           extractionStatus: 'succeeded',
         },
-        normalizedNodeId: 'node-evidence-1',
-        taskId: 'task-evidence-1',
+        normalizedNodeId,
+        taskId: createdTask.task.id,
       },
     });
 
@@ -1087,10 +1104,10 @@ describe('thesis lifecycle registry routes', () => {
     expect(createdEvidence.evidenceFragment.extractionMethod).toBe('pdf-parse');
     expect(createdEvidence.evidenceFragment.provenance).toEqual(expect.objectContaining({ page: 14 }));
     expect(createdEvidence.evidenceFragment.context.section).toEqual(
-      expect.objectContaining({ id: 'node-evidence-1', title: 'Marco teórico', nodeType: 'section' }),
+      expect.objectContaining({ id: normalizedNodeId, nodeType: 'section' }),
     );
     expect(createdEvidence.evidenceFragment.context.task).toEqual(
-      expect.objectContaining({ id: 'task-evidence-1', title: 'Relacionar evidencia', status: 'in_progress' }),
+      expect.objectContaining({ id: createdTask.task.id, title: 'Relacionar evidencia', status: 'in_progress' }),
     );
 
     const detailResponse = await app.inject({
@@ -1114,8 +1131,8 @@ describe('thesis lifecycle registry routes', () => {
     const listPayload = listResponse.json() as { evidenceFragments: Array<{ id: string; source: { id: string; title: string } }> };
     const sourcePayload = sourceDetailResponse.json() as { source: { evidenceCount: number; claimCount: number } };
 
-    expect(detailPayload.evidenceFragment.context.section?.id).toBe('node-evidence-1');
-    expect(detailPayload.evidenceFragment.context.task?.id).toBe('task-evidence-1');
+    expect(detailPayload.evidenceFragment.context.section?.id).toBe(normalizedNodeId);
+    expect(detailPayload.evidenceFragment.context.task?.id).toBe(createdTask.task.id);
     expect(listPayload.evidenceFragments).toEqual([
       expect.objectContaining({
         id: createdEvidence.evidenceFragment.id,
@@ -1200,6 +1217,97 @@ describe('thesis lifecycle registry routes', () => {
       message: `Workflow task task-cross-thesis is not available for thesis ${thesisAId}.`,
       thesisId: thesisAId,
     });
+  });
+
+  it('exposes thesis-scoped public evidence context setup with tasks and active-import normalized nodes', async () => {
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis de setup público',
+        degreeProgram: 'Doctorado en Sistemas',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-evidence-setup',
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: {
+        importRootPath: '/workspace/tmp/user-testing-intake-normalization/latex-project',
+      },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+    const intakeJobId = (intakeResponse.json() as { intakeJob: { id: string } }).intakeJob.id;
+
+    const taskOneResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/tasks`,
+      payload: {
+        title: 'Primera tarea',
+        intent: 'Preparar contexto de investigación',
+        status: 'pending',
+        priority: 1,
+        sortOrder: 2,
+      },
+    });
+    const taskTwoResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/tasks`,
+      payload: {
+        title: 'Segunda tarea',
+        intent: 'Vincular evidencia al capítulo',
+        status: 'in_progress',
+        priority: 2,
+        sortOrder: 1,
+      },
+    });
+
+    expect(taskOneResponse.statusCode).toBe(201);
+    expect(taskTwoResponse.statusCode).toBe(201);
+
+    const listTasksResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/tasks`,
+    });
+
+    expect(listTasksResponse.statusCode).toBe(200);
+    expect((listTasksResponse.json() as { tasks: Array<{ title: string; status: string }> }).tasks.map((task) => ({
+      title: task.title,
+      status: task.status,
+    }))).toEqual([
+      { title: 'Segunda tarea', status: 'in_progress' },
+      { title: 'Primera tarea', status: 'pending' },
+    ]);
+
+    const setupResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/evidence-context-setup`,
+    });
+
+    expect(setupResponse.statusCode).toBe(200);
+
+    const setupPayload = setupResponse.json() as {
+      setup: {
+        thesisId: string;
+        activeImportId: string | null;
+        normalizedNodes: Array<{ id: string; thesisId: string }>;
+        tasks: Array<{ title: string; status: string }>;
+      };
+    };
+
+    expect(setupPayload.setup.thesisId).toBe(thesisId);
+    expect(setupPayload.setup.activeImportId).toBe(intakeJobId);
+    expect(setupPayload.setup.normalizedNodes.length).toBeGreaterThan(0);
+    expect(setupPayload.setup.normalizedNodes.every((node) => node.thesisId === thesisId)).toBe(true);
+    expect(setupPayload.setup.tasks.map((task) => ({ title: task.title, status: task.status }))).toEqual([
+      { title: 'Segunda tarea', status: 'in_progress' },
+      { title: 'Primera tarea', status: 'pending' },
+    ]);
   });
 
   it('creates claims, links and unlinks evidence, exposes traceability, and keeps zero-evidence state explicit', async () => {
