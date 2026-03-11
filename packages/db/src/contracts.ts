@@ -230,6 +230,7 @@ export type ClaimRecord = TimestampFields & {
   text: string;
   status: ClaimStatus;
   supportSummary: string;
+  evidenceOrderingJson: string;
 };
 
 export type ClaimEvidenceLinkRecord = TimestampFields & {

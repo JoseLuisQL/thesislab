@@ -143,7 +143,7 @@ describe('schema migrations', () => {
       "INSERT INTO normalized_nodes (id, thesis_id, intake_job_id, parent_node_id, node_type, title, content, ordinal, source_path, source_start, source_end, provenance_kind, provenance_json) VALUES ('node-2', 'thesis-1', NULL, 'node-1', 'section', 'Marco teórico', 'Más contenido', 2, 'chapter1.tex', '11', '20', 'latex', '{}')",
       "INSERT INTO sources (id, thesis_id, source_type, title, authors_json, publication_year, locator, status, ingest_metadata_json) VALUES ('source-1', 'thesis-1', 'article', 'A source', '[\"Ada\"]', 2024, 'doi:demo', 'ready', '{}')",
       "INSERT INTO evidence_fragments (id, thesis_id, source_id, normalized_node_id, task_id, locator, snippet, extraction_method, confidence, status, provenance_json) VALUES ('evidence-1', 'thesis-1', 'source-1', 'node-2', 'task-2', 'p. 4', 'Important evidence', 'manual', 0.9, 'linked', '{}')",
-      "INSERT INTO claims (id, thesis_id, normalized_node_id, text, status, support_summary) VALUES ('claim-1', 'thesis-1', 'node-2', 'A defensible claim', 'draft', 'Needs support')",
+      "INSERT INTO claims (id, thesis_id, normalized_node_id, text, status, support_summary, evidence_ordering_json) VALUES ('claim-1', 'thesis-1', 'node-2', 'A defensible claim', 'draft', 'Needs support', '{\"evidenceFragmentIdOrder\":[]}')",
       "INSERT INTO compliance_runs (id, thesis_id, policy_profile_id, status, summary_json, evaluated_rule_count, warning_rule_count, skipped_rule_count, started_at, completed_at) VALUES ('compliance-run-1', 'thesis-1', 'policy-1', 'completed', '{}', 1, 0, 0, '2026-03-09T00:22:00.000Z', '2026-03-09T00:23:00.000Z')",
       "INSERT INTO compliance_issues (id, thesis_id, compliance_run_id, policy_profile_id, rule_id, normalized_node_id, severity, message, remediation, disposition) VALUES ('compliance-issue-1', 'thesis-1', 'compliance-run-1', 'policy-1', 'rule-1', 'node-2', 'warning', 'Missing section detail', 'Add detail', 'warning')",
       "INSERT INTO academic_qa_runs (id, thesis_id, status, assessed_scope_json, skipped_scope_json, summary_json, started_at, completed_at) VALUES ('qa-run-1', 'thesis-1', 'completed', '{}', '{}', '{}', '2026-03-09T00:24:00.000Z', '2026-03-09T00:25:00.000Z')",
@@ -154,7 +154,7 @@ describe('schema migrations', () => {
 
     const invalidSql = [
       "INSERT INTO evidence_fragments (id, thesis_id, source_id, normalized_node_id, task_id, locator, snippet, extraction_method, confidence, status, provenance_json) VALUES ('evidence-invalid', 'thesis-1', 'source-1', 'missing-node', 'task-2', NULL, 'Broken evidence', 'manual', NULL, 'linked', '{}')",
-      "INSERT INTO claims (id, thesis_id, normalized_node_id, text, status, support_summary) VALUES ('claim-invalid', 'thesis-1', 'missing-node', 'Broken claim', 'draft', '')",
+      "INSERT INTO claims (id, thesis_id, normalized_node_id, text, status, support_summary, evidence_ordering_json) VALUES ('claim-invalid', 'thesis-1', 'missing-node', 'Broken claim', 'draft', '', '{\"evidenceFragmentIdOrder\":[]}')",
       "INSERT INTO zotero_mappings (id, thesis_id, normalized_node_id, source_id, scope, library_id, collection_key, item_key, normalized_data_json, connector_status, last_synced_at) VALUES ('zotero-invalid', 'thesis-1', 'missing-node', 'source-1', 'thesis', 'library-1', NULL, NULL, '{}', 'mocked', NULL)",
       "INSERT INTO compliance_issues (id, thesis_id, compliance_run_id, policy_profile_id, rule_id, normalized_node_id, severity, message, remediation, disposition) VALUES ('compliance-issue-invalid', 'thesis-1', 'compliance-run-1', 'policy-1', 'rule-1', 'missing-node', 'warning', 'Broken issue', NULL, 'warning')",
       "INSERT INTO academic_qa_issues (id, thesis_id, academic_qa_run_id, claim_id, normalized_node_id, category, severity, message, rationale, remediation, triggering_condition) VALUES ('qa-issue-invalid-claim', 'thesis-1', 'qa-run-1', 'missing-claim', 'node-2', 'evidence-gap', 'warning', 'Broken qa issue', 'Missing claim', NULL, 'low-support')",
@@ -366,8 +366,8 @@ conn.close()
       INSERT INTO sources (id, thesis_id, source_type, title, authors_json, publication_year, locator, status, ingest_metadata_json)
       VALUES ('source-base-1', 'thesis-base-1', 'article', 'A source', '["Ada"]', 2024, 'doi:demo', 'ready', '{}');
 
-      INSERT INTO claims (id, thesis_id, normalized_node_id, text, status, support_summary)
-      VALUES ('claim-base-1', 'thesis-base-1', 'node-base-2', 'A defensible claim', 'draft', 'Needs support');
+      INSERT INTO claims (id, thesis_id, normalized_node_id, text, status, support_summary, evidence_ordering_json)
+      VALUES ('claim-base-1', 'thesis-base-1', 'node-base-2', 'A defensible claim', 'draft', 'Needs support', '{"evidenceFragmentIdOrder":[]}');
 
       INSERT INTO compliance_runs (id, thesis_id, policy_profile_id, status, summary_json, evaluated_rule_count, warning_rule_count, skipped_rule_count, started_at, completed_at)
       VALUES ('compliance-run-base-1', 'thesis-base-1', 'policy-base-1', 'completed', '{}', 1, 0, 0, '2026-03-09T00:22:00.000Z', '2026-03-09T00:23:00.000Z');
@@ -387,8 +387,8 @@ conn.close()
     `)).rejects.toThrow(/FOREIGN KEY constraint failed/);
 
     await expect(connection.sqlite.execute(`
-      INSERT INTO claims (id, thesis_id, normalized_node_id, text, status, support_summary)
-      VALUES ('claim-invalid', 'thesis-base-1', 'missing-node', 'Broken claim', 'draft', '')
+      INSERT INTO claims (id, thesis_id, normalized_node_id, text, status, support_summary, evidence_ordering_json)
+      VALUES ('claim-invalid', 'thesis-base-1', 'missing-node', 'Broken claim', 'draft', '', '{"evidenceFragmentIdOrder":[]}')
     `)).rejects.toThrow(/FOREIGN KEY constraint failed/);
 
     await expect(connection.sqlite.execute(`

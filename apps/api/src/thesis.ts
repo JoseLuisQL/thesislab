@@ -622,6 +622,12 @@ function parseClaimEvidenceOrderingMetadata(rawValue: string | null): ClaimEvide
   }
 }
 
+function serializeClaimEvidenceOrderingMetadata(metadata: ClaimEvidenceOrderingMetadata): string {
+  return JSON.stringify({
+    evidenceFragmentIdOrder: metadata.evidenceFragmentIdOrder,
+  } satisfies ClaimEvidenceOrderingMetadata);
+}
+
 export class SourceNotFoundError extends Error {
   constructor(public readonly thesisId: string, public readonly sourceId: string) {
     super(`Source ${sourceId} was not found for thesis ${thesisId}.`);
@@ -1498,6 +1504,7 @@ export class ThesisLifecycleService {
       text: input.text,
       status: input.status ?? 'draft',
       supportSummary: input.supportSummary ?? '',
+      evidenceOrderingJson: serializeClaimEvidenceOrderingMetadata({ evidenceFragmentIdOrder: [] }),
       createdAt: now,
       updatedAt: now,
     });
@@ -1541,7 +1548,7 @@ export class ThesisLifecycleService {
     }
 
     const now = new Date().toISOString();
-    const currentOrdering = this.getClaimEvidenceOrdering(claim.supportSummary);
+    const currentOrdering = this.getClaimEvidenceOrdering(claim.evidenceOrderingJson);
     const nextEvidenceOrder = [...currentOrdering];
 
     for (const evidenceFragmentId of evidenceIds) {
@@ -1573,7 +1580,7 @@ export class ThesisLifecycleService {
       }
     }
 
-    await this.persistClaimEvidenceOrdering(thesisId, claim.id, claim.supportSummary, nextEvidenceOrder, now);
+    await this.persistClaimEvidenceOrdering(thesisId, claim.id, nextEvidenceOrder, now);
 
     return this.getClaim(thesisId, claimId);
   }
@@ -1582,14 +1589,14 @@ export class ThesisLifecycleService {
     const claim = await this.requireClaim(thesisId, claimId);
     await this.requireEvidenceFragment(thesisId, evidenceFragmentId);
     const linkId = await this.requireClaimEvidenceLink(thesisId, claimId, evidenceFragmentId);
-    const nextEvidenceOrder = this.getClaimEvidenceOrdering(claim.supportSummary).filter((id) => id !== evidenceFragmentId);
+    const nextEvidenceOrder = this.getClaimEvidenceOrdering(claim.evidenceOrderingJson).filter((id) => id !== evidenceFragmentId);
     const now = new Date().toISOString();
 
     await this.db
       .delete(claimEvidenceLinks)
       .where(eq(claimEvidenceLinks.id, linkId));
 
-    await this.persistClaimEvidenceOrdering(thesisId, claim.id, claim.supportSummary, nextEvidenceOrder, now);
+    await this.persistClaimEvidenceOrdering(thesisId, claim.id, nextEvidenceOrder, now);
 
     return this.getClaim(thesisId, claimId);
   }
@@ -2329,9 +2336,9 @@ export class ThesisLifecycleService {
   }
 
   private async mapClaimRecord(
-    record: { id: string; thesisId: string; normalizedNodeId: string | null; text: string; status: string; supportSummary: string; createdAt: string; updatedAt: string; },
+    record: { id: string; thesisId: string; normalizedNodeId: string | null; text: string; status: string; supportSummary: string; evidenceOrderingJson: string; createdAt: string; updatedAt: string; },
   ): Promise<ClaimPayload> {
-    const orderedClaimLinks = await this.listClaimEvidenceLinksForClaim(record.thesisId, record.id, record.supportSummary);
+    const orderedClaimLinks = await this.listClaimEvidenceLinksForClaim(record.thesisId, record.id, record.evidenceOrderingJson);
 
     const evidenceFragmentsPayload = await Promise.all(orderedClaimLinks.map(async (link) => {
       const evidence = await this.db.query.evidenceFragments.findFirst({
@@ -2390,7 +2397,7 @@ export class ThesisLifecycleService {
   private async listClaimEvidenceLinksForClaim(
     thesisId: string,
     claimId: string,
-    supportSummary?: string,
+    evidenceOrderingJson?: string,
   ): Promise<ClaimEvidenceLinkRecord[]> {
     const linkRows = await this.db
       .select()
@@ -2400,7 +2407,7 @@ export class ThesisLifecycleService {
       .all();
 
     const claimLinks = linkRows.filter((link) => link.claimId === claimId);
-    const preferredOrder = this.getClaimEvidenceOrdering(supportSummary ?? '').filter((id) =>
+    const preferredOrder = this.getClaimEvidenceOrdering(evidenceOrderingJson ?? '').filter((id) =>
       claimLinks.some((link) => link.evidenceFragmentId === id),
     );
 
@@ -2428,23 +2435,20 @@ export class ThesisLifecycleService {
     });
   }
 
-  private getClaimEvidenceOrdering(supportSummary: string): string[] {
-    return parseClaimEvidenceOrderingMetadata(supportSummary).evidenceFragmentIdOrder;
+  private getClaimEvidenceOrdering(evidenceOrderingJson: string): string[] {
+    return parseClaimEvidenceOrderingMetadata(evidenceOrderingJson).evidenceFragmentIdOrder;
   }
 
   private async persistClaimEvidenceOrdering(
     thesisId: string,
     claimId: string,
-    supportSummary: string,
     evidenceFragmentIdOrder: string[],
     updatedAt: string,
   ) {
     await this.db
       .update(claims)
       .set({
-        supportSummary: JSON.stringify({
-          evidenceFragmentIdOrder,
-        } satisfies ClaimEvidenceOrderingMetadata),
+        evidenceOrderingJson: serializeClaimEvidenceOrderingMetadata({ evidenceFragmentIdOrder }),
         updatedAt,
       })
       .where(eq(claims.id, claimId));

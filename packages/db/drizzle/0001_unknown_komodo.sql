@@ -86,6 +86,7 @@ CREATE TABLE `claims` (
 	`text` text NOT NULL,
 	`status` text NOT NULL,
 	`support_summary` text DEFAULT '' NOT NULL,
+	`evidence_ordering_json` text DEFAULT '{"evidenceFragmentIdOrder":[]}' NOT NULL,
 	`created_at` text DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW')) NOT NULL,
 	`updated_at` text DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW')) NOT NULL,
 	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade,

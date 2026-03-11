@@ -184,6 +184,7 @@ export const claims = sqliteTable('claims', {
   text: text('text').notNull(),
   status: text('status').notNull(),
   supportSummary: text('support_summary').notNull().default(''),
+  evidenceOrderingJson: text('evidence_ordering_json').notNull().default('{"evidenceFragmentIdOrder":[]}'),
   ...timestampColumns,
 });
 

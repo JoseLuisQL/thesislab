@@ -1288,7 +1288,7 @@ describe('thesis lifecycle registry routes', () => {
     expect(linkedClaim.claim.linkedEvidenceCount).toBe(2);
     expect(linkedClaim.claim.linkedEvidenceIds).toEqual([evidenceAId, evidenceBId]);
     expect(linkedClaim.claim.hasEvidence).toBe(true);
-    expect(linkedClaim.claim.supportSummary).toBe(JSON.stringify({ evidenceFragmentIdOrder: [evidenceAId, evidenceBId] }));
+    expect(linkedClaim.claim.supportSummary).toBe('Pendiente de enlazar evidencia');
     expect(linkedClaim.claim.traceability.evidenceFragments).toEqual([
       expect.objectContaining({
         id: evidenceAId,
@@ -1349,7 +1349,7 @@ describe('thesis lifecycle registry routes', () => {
     expect(unlinkedClaim.claim.linkedEvidenceIds).toEqual([evidenceBId]);
     expect(unlinkedClaim.claim.linkedEvidenceCount).toBe(1);
     expect(unlinkedClaim.claim.hasEvidence).toBe(true);
-    expect(unlinkedClaim.claim.supportSummary).toBe(JSON.stringify({ evidenceFragmentIdOrder: [evidenceBId] }));
+    expect(unlinkedClaim.claim.supportSummary).toBe('Pendiente de enlazar evidencia');
 
     const secondUnlinkResponse = await app.inject({
       method: 'DELETE',
@@ -1448,6 +1448,7 @@ describe('thesis lifecycle registry routes', () => {
       payload: {
         text: 'La evidencia enlazada debe mantener un orden estable.',
         status: 'draft',
+        supportSummary: 'Resumen redactado por la persona usuaria',
       },
     });
 
@@ -1465,6 +1466,7 @@ describe('thesis lifecycle registry routes', () => {
     expect(linkResponse.statusCode).toBe(200);
     expect((linkResponse.json() as { claim: { linkedEvidenceIds: string[]; traceability: { evidenceFragments: Array<{ id: string }> } } }).claim).toMatchObject({
       linkedEvidenceIds: [thirdEvidenceId, firstEvidenceId, secondEvidenceId],
+      supportSummary: 'Resumen redactado por la persona usuaria',
       traceability: {
         evidenceFragments: [
           expect.objectContaining({ id: thirdEvidenceId }),
@@ -1495,6 +1497,7 @@ describe('thesis lifecycle registry routes', () => {
       };
 
       expect(detailClaim.claim.linkedEvidenceIds).toEqual([thirdEvidenceId, firstEvidenceId, secondEvidenceId]);
+      expect((detailClaim.claim as { supportSummary?: string }).supportSummary).toBe('Resumen redactado por la persona usuaria');
       expect(detailClaim.claim.traceability.evidenceFragments.map((fragment) => fragment.id)).toEqual([
         thirdEvidenceId,
         firstEvidenceId,
@@ -1503,6 +1506,7 @@ describe('thesis lifecycle registry routes', () => {
       expect(listClaims.claims).toContainEqual(
         expect.objectContaining({
           id: claimId,
+          supportSummary: 'Resumen redactado por la persona usuaria',
           linkedEvidenceIds: [thirdEvidenceId, firstEvidenceId, secondEvidenceId],
           traceability: expect.objectContaining({
             evidenceFragments: [
@@ -1523,6 +1527,7 @@ describe('thesis lifecycle registry routes', () => {
     expect(unlinkResponse.statusCode).toBe(200);
     expect((unlinkResponse.json() as { claim: { linkedEvidenceIds: string[]; traceability: { evidenceFragments: Array<{ id: string }> } } }).claim).toMatchObject({
       linkedEvidenceIds: [thirdEvidenceId, secondEvidenceId],
+      supportSummary: 'Resumen redactado por la persona usuaria',
       traceability: {
         evidenceFragments: [
           expect.objectContaining({ id: thirdEvidenceId }),
@@ -1539,6 +1544,7 @@ describe('thesis lifecycle registry routes', () => {
     expect(detailAfterUnlink.statusCode).toBe(200);
     expect((detailAfterUnlink.json() as { claim: { linkedEvidenceIds: string[]; traceability: { evidenceFragments: Array<{ id: string }> } } }).claim).toMatchObject({
       linkedEvidenceIds: [thirdEvidenceId, secondEvidenceId],
+      supportSummary: 'Resumen redactado por la persona usuaria',
       traceability: {
         evidenceFragments: [
           expect.objectContaining({ id: thirdEvidenceId }),
