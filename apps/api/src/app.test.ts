@@ -1849,6 +1849,258 @@ Original context body.
     expect(createHash('sha256').update(fs.readFileSync(mainTex, 'utf8')).digest('hex')).toBe(mainBeforeHash);
   });
 
+  it('runs LaTeX builds with bibliography diagnostics, preserves the last successful artifact, and exposes build history', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'latex-build-history-'));
+    const latexDir = path.join(fixtureRoot, 'latex-project');
+    fs.mkdirSync(latexDir, { recursive: true });
+
+    const mainTex = path.join(latexDir, 'main.tex');
+    const refsBib = path.join(latexDir, 'refs.bib');
+
+    fs.writeFileSync(
+      mainTex,
+      String.raw`\documentclass{report}
+\begin{document}
+\chapter{Main Chapter}
+\cite{demo}
+\bibliography{refs}
+\end{document}
+`,
+      'utf8',
+    );
+    fs.writeFileSync(refsBib, '@book{demo,title={Demo},author={Autor},year={2024}}\n', 'utf8');
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis build latex',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const firstBuildResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/latex/builds`,
+      payload: { createdBy: 'user:test' },
+    });
+
+    expect(firstBuildResponse.statusCode).toBe(201);
+    const firstBuildPayload = firstBuildResponse.json() as {
+      build: {
+        buildRun: {
+          id: string;
+          status: string;
+          artifactPath: string | null;
+          retainedArtifactPath: string | null;
+          bibliographyStatus: string;
+          bibliography: { mode: string; status: string; inputs: string[]; missingInputs: string[]; commands: string[] };
+          diagnosticsSummary: { errorCount: number; warningCount: number; infoCount: number };
+          checkpointId: string | null;
+        };
+        history: {
+          latestAttempted: { id: string };
+          latestSuccessful: { id: string; artifactPath: string | null } | null;
+          runs: Array<{ id: string }>;
+        };
+      };
+    };
+
+    expect(firstBuildPayload.build.buildRun.status).toBe('completed');
+    expect(firstBuildPayload.build.buildRun.bibliographyStatus).toBe('ready');
+    expect(firstBuildPayload.build.buildRun.bibliography).toMatchObject({
+      mode: 'bibliography',
+      status: 'ready',
+      inputs: ['refs.bib'],
+      missingInputs: [],
+      commands: ['bibtex'],
+    });
+    expect(firstBuildPayload.build.buildRun.checkpointId).toEqual(expect.any(String));
+    expect(firstBuildPayload.build.buildRun.artifactPath).toEqual(expect.any(String));
+    expect(firstBuildPayload.build.buildRun.retainedArtifactPath).toBe(firstBuildPayload.build.buildRun.artifactPath);
+    expect(firstBuildPayload.build.buildRun.diagnosticsSummary).toEqual({ errorCount: 0, warningCount: 0, infoCount: 1 });
+    expect(fs.existsSync(firstBuildPayload.build.buildRun.artifactPath as string)).toBe(true);
+    expect(firstBuildPayload.build.history.latestSuccessful?.id).toBe(firstBuildPayload.build.buildRun.id);
+    const successfulArtifactPath = firstBuildPayload.build.buildRun.artifactPath as string;
+
+    fs.unlinkSync(refsBib);
+
+    const failingBuildResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/latex/builds`,
+      payload: { createdBy: 'user:test' },
+    });
+
+    expect(failingBuildResponse.statusCode).toBe(201);
+    const failingBuildPayload = failingBuildResponse.json() as {
+      build: {
+        buildRun: {
+          id: string;
+          status: string;
+          artifactPath: string | null;
+          retainedArtifactPath: string | null;
+          bibliographyStatus: string;
+          bibliography: { mode: string; status: string; missingInputs: string[] };
+          diagnostics: Array<{ category: string; severity: string; filePath: string | null; line: number | null; mappingStatus: string; message: string }>;
+          logPath: string | null;
+        };
+        history: {
+          latestAttempted: { id: string; status: string };
+          latestSuccessful: { id: string; artifactPath: string | null; retainedArtifactPath: string | null } | null;
+          runs: Array<{ id: string; status: string }>;
+        };
+      };
+    };
+
+    expect(failingBuildPayload.build.buildRun.status).toBe('failed');
+    expect(failingBuildPayload.build.buildRun.artifactPath).toBeNull();
+    expect(failingBuildPayload.build.buildRun.retainedArtifactPath).toBe(successfulArtifactPath);
+    expect(failingBuildPayload.build.buildRun.bibliographyStatus).toBe('missing_inputs');
+    expect(failingBuildPayload.build.buildRun.bibliography).toMatchObject({
+      mode: 'bibliography',
+      status: 'missing_inputs',
+      missingInputs: ['refs.bib'],
+    });
+    expect(failingBuildPayload.build.buildRun.diagnostics).toContainEqual(
+      expect.objectContaining({
+        category: 'bibliography',
+        severity: 'error',
+        filePath: 'main.tex',
+        line: 5,
+        mappingStatus: 'mapped',
+      }),
+    );
+    expect(failingBuildPayload.build.history.latestAttempted.id).toBe(failingBuildPayload.build.buildRun.id);
+    expect(failingBuildPayload.build.history.latestSuccessful?.id).toBe(firstBuildPayload.build.buildRun.id);
+    expect(failingBuildPayload.build.history.latestSuccessful?.artifactPath).toBe(successfulArtifactPath);
+    expect(failingBuildPayload.build.history.runs.map((run) => run.id)).toEqual([
+      failingBuildPayload.build.buildRun.id,
+      firstBuildPayload.build.buildRun.id,
+    ]);
+    expect(fs.readFileSync(failingBuildPayload.build.buildRun.logPath as string, 'utf8')).toContain('Missing bibliography file refs.bib');
+
+    const historyResponse = await app.inject({ method: 'GET', url: `/theses/${thesisId}/latex/builds` });
+    expect(historyResponse.statusCode).toBe(200);
+    const historyPayload = historyResponse.json() as {
+      history: {
+        latestAttempted: { id: string; status: string } | null;
+        latestSuccessful: { id: string; retainedArtifactPath: string | null } | null;
+        runs: Array<{ id: string; status: string; retainedArtifactPath: string | null }>;
+      };
+    };
+    expect(historyPayload.history.latestAttempted).toMatchObject({ id: failingBuildPayload.build.buildRun.id, status: 'failed' });
+    expect(historyPayload.history.latestSuccessful).toMatchObject({ id: firstBuildPayload.build.buildRun.id, retainedArtifactPath: successfulArtifactPath });
+    expect(historyPayload.history.runs).toHaveLength(2);
+
+    const buildDetailResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/latex/builds/${failingBuildPayload.build.buildRun.id}`,
+    });
+    expect(buildDetailResponse.statusCode).toBe(200);
+    expect((buildDetailResponse.json() as { buildRun: { id: string; bibliography: { missingInputs: string[] } } }).buildRun).toMatchObject({
+      id: failingBuildPayload.build.buildRun.id,
+      bibliography: { missingInputs: ['refs.bib'] },
+    });
+  });
+
+  it('detects biblatex and unsupported bibliography configurations explicitly during LaTeX builds', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'latex-build-bibliography-modes-'));
+    const biblatexDir = path.join(fixtureRoot, 'biblatex-project');
+    const unsupportedDir = path.join(fixtureRoot, 'unsupported-project');
+    fs.mkdirSync(biblatexDir, { recursive: true });
+    fs.mkdirSync(unsupportedDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(biblatexDir, 'main.tex'),
+      String.raw`\documentclass{report}
+\addbibresource{library.bib}
+\begin{document}
+\printbibliography
+\end{document}
+`,
+      'utf8',
+    );
+    fs.writeFileSync(path.join(biblatexDir, 'library.bib'), '@book{demo,title={Demo}}\n', 'utf8');
+
+    fs.writeFileSync(
+      path.join(unsupportedDir, 'main.tex'),
+      String.raw`\documentclass{report}
+\bibliographystyle{plain}
+\bibliography{refs}
+\begin{document}
+\printbibliography
+\end{document}
+`,
+      'utf8',
+    );
+    fs.writeFileSync(path.join(unsupportedDir, 'refs.bib'), '@book{demo,title={Demo}}\n', 'utf8');
+
+    const createBiblatex = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis biblatex',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+    const biblatexThesisId = (createBiblatex.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const createUnsupported = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis unsupported bibliography',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+    const unsupportedThesisId = (createUnsupported.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    await app.inject({ method: 'POST', url: `/theses/${biblatexThesisId}/intake-jobs`, payload: { importRootPath: biblatexDir } });
+    await app.inject({ method: 'POST', url: `/theses/${unsupportedThesisId}/intake-jobs`, payload: { importRootPath: unsupportedDir } });
+
+    const biblatexBuild = await app.inject({
+      method: 'POST',
+      url: `/theses/${biblatexThesisId}/latex/builds`,
+      payload: { createdBy: 'user:test' },
+    });
+    const unsupportedBuild = await app.inject({
+      method: 'POST',
+      url: `/theses/${unsupportedThesisId}/latex/builds`,
+      payload: { createdBy: 'user:test' },
+    });
+
+    expect(biblatexBuild.statusCode).toBe(201);
+    expect(unsupportedBuild.statusCode).toBe(201);
+
+    expect((biblatexBuild.json() as { build: { buildRun: { status: string; bibliographyStatus: string; bibliography: { mode: string; commands: string[]; status: string } } } }).build.buildRun).toMatchObject({
+      status: 'completed',
+      bibliographyStatus: 'ready',
+      bibliography: { mode: 'biblatex', commands: ['biber'], status: 'ready' },
+    });
+
+    expect((unsupportedBuild.json() as { build: { buildRun: { status: string; bibliographyStatus: string; bibliography: { mode: string; status: string }; diagnostics: Array<{ category: string; message: string }> } } }).build.buildRun).toMatchObject({
+      status: 'failed',
+      bibliographyStatus: 'unsupported',
+      bibliography: { mode: 'unsupported', status: 'unsupported' },
+      diagnostics: [expect.objectContaining({ category: 'bibliography', message: 'Unsupported bibliography workflow detected; automatic bibliography execution skipped.' })],
+    });
+  });
+
   it('extracts degraded DOCX and PDF outlines with explicit provenance-unavailable warnings when semantics are weak', async () => {
     const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-degraded-'));
     const docxPath = path.join(fixtureRoot, 'degraded.docx');

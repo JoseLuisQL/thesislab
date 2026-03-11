@@ -23,6 +23,7 @@ run_container() {
     -e CI=1 \
     -e DOCKER_API_VERSION="${DOCKER_API_VERSION:-1.44}" \
     -e HOST_REPO_ROOT="$ROOT" \
+    -e PATH="/usr/bin:/usr/local/bin:/bin" \
     "$IMAGE" \
     bash -lc "
       set -e

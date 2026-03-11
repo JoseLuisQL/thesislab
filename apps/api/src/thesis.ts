@@ -1,12 +1,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import zlib from 'node:zlib';
 
 import { asc, desc, eq } from 'drizzle-orm';
 
 import {
   createDatabaseConnection,
+  buildRuns,
   checkpoints,
   feedbackEntries,
   intakeJobs,
@@ -225,6 +227,62 @@ type LatexRestorePayload = {
     sha256After: string;
   }>;
   structure: LatexStructureSnapshot;
+};
+
+type LatexBuildEngine = 'latexmk';
+
+type BibliographyConfiguration = {
+  mode: 'bibliography' | 'biblatex' | 'unsupported' | 'none';
+  inputs: string[];
+  missingInputs: string[];
+  commands: Array<'bibtex' | 'biber'>;
+  status: 'not_required' | 'ready' | 'missing_inputs' | 'unsupported';
+  detail: string;
+};
+
+type LatexDiagnostic = {
+  severity: 'error' | 'warning' | 'info';
+  category: 'compile' | 'bibliography' | 'toolchain';
+  message: string;
+  filePath: string | null;
+  line: number | null;
+  mappingStatus: 'mapped' | 'unmapped';
+  mappingReason: string | null;
+  source: string;
+};
+
+type LatexBuildPayload = {
+  thesisId: string;
+  buildRun: LatexBuildRunPayload;
+  history: {
+    latestAttempted: LatexBuildRunPayload;
+    latestSuccessful: LatexBuildRunPayload | null;
+    runs: LatexBuildRunPayload[];
+  };
+};
+
+export type LatexBuildRunPayload = {
+  id: string;
+  thesisId: string;
+  checkpointId: string | null;
+  status: 'completed' | 'failed' | 'completed_with_warnings';
+  engine: LatexBuildEngine;
+  artifactPath: string | null;
+  retainedArtifactPath: string | null;
+  logPath: string | null;
+  bibliographyStatus: string;
+  bibliography: BibliographyConfiguration;
+  diagnostics: LatexDiagnostic[];
+  diagnosticsSummary: {
+    errorCount: number;
+    warningCount: number;
+    infoCount: number;
+  };
+  startedAt: string;
+  completedAt: string;
+  isLatestSuccessful: boolean;
+  createdAt: string;
+  updatedAt: string;
 };
 
 type IntakeExtractionStatus = IntakeReportSummary['extractionStatus'];
@@ -455,6 +513,13 @@ export class LatexCheckpointRestoreError extends Error {
   constructor(public readonly thesisId: string, public readonly checkpointId: string, message: string) {
     super(message);
     this.name = 'LatexCheckpointRestoreError';
+  }
+}
+
+export class LatexBuildNotReadyError extends Error {
+  constructor(public readonly thesisId: string, message: string) {
+    super(message);
+    this.name = 'LatexBuildNotReadyError';
   }
 }
 
@@ -851,6 +916,163 @@ export class ThesisLifecycleService {
       restoredFiles,
       structure,
     };
+  }
+
+  async runLatexBuild(thesisId: string, input: { createdBy: string }): Promise<LatexBuildPayload> {
+    const thesis = await this.requireThesis(thesisId);
+    const activeWorkspace = await this.requireActiveLatexWorkspace(thesisId, thesis.activeImportId);
+    const structure = inspectLatexWorkspace(thesis.workspacePath, activeWorkspace.importRootPath);
+    const bibliography = detectBibliographyConfiguration(activeWorkspace.importRootPath, structure.includeGraph?.filesInOrder ?? []);
+    const buildRoot = resolveLatexBuildRoot(activeWorkspace.importRootPath, structure.entrypoint);
+
+    const checkpoint = await this.createCheckpoint(thesisId, {
+      label: 'Checkpoint previo a compilación LaTeX',
+      note: `Snapshot asociado a la compilación de ${structure.entrypoint ?? 'workspace activo'}.`,
+      scope: 'latex-build',
+      reason: 'before-latex-build',
+      snapshotPath: null,
+      snapshotMetadata: {
+        kind: 'latex-build',
+        intakeJobId: activeWorkspace.id,
+        entrypoint: structure.entrypoint,
+        bibliographyStatus: bibliography.status,
+      },
+      createdBy: input.createdBy,
+    });
+
+    const startedAt = new Date().toISOString();
+    const buildRunId = randomUUID();
+    const buildArtifactsDir = path.join(process.cwd(), 'tmp', 'latex-builds', thesisId, buildRunId);
+    fs.mkdirSync(buildArtifactsDir, { recursive: true });
+    const logPath = path.join(buildArtifactsDir, 'latexmk.log');
+    const artifactPath = structure.entrypoint ? path.join(buildArtifactsDir, 'output.pdf') : null;
+
+    const buildResult = runContainerizedLatexBuild({
+      thesisId,
+      workspacePath: thesis.workspacePath,
+      importRootPath: activeWorkspace.importRootPath,
+      entrypoint: structure.entrypoint,
+      bibliography,
+      artifactPath,
+      logPath,
+    });
+
+    const diagnostics = normalizeLatexDiagnostics({
+      importRootPath: activeWorkspace.importRootPath,
+      structure,
+      bibliography,
+      log: buildResult.log,
+      statusCode: buildResult.exitCode,
+    });
+
+    const diagnosticsSummary = summarizeDiagnostics(diagnostics);
+    const completedAt = new Date().toISOString();
+    const status = buildResult.exitCode === 0
+      ? (diagnosticsSummary.warningCount > 0 ? 'completed_with_warnings' : 'completed')
+      : 'failed';
+
+    const latestSuccessfulBefore = await this.getLatestSuccessfulBuildRun(thesisId);
+    const retainedArtifactPath = status === 'failed'
+      ? (latestSuccessfulBefore?.retainedArtifactPath ?? latestSuccessfulBefore?.artifactPath ?? null)
+      : buildResult.artifactExists
+        ? artifactPath
+        : null;
+
+    await this.db.transaction(async (tx) => {
+      if (status !== 'failed') {
+        await tx
+          .update(buildRuns)
+          .set({
+            isLatestSuccessful: false,
+            updatedAt: completedAt,
+          })
+          .where(eq(buildRuns.thesisId, thesisId));
+      }
+
+      await tx.insert(buildRuns).values({
+        id: buildRunId,
+        thesisId,
+        checkpointId: checkpoint.id,
+        status,
+        engine: 'latexmk',
+        artifactPath: buildResult.artifactExists ? artifactPath : null,
+        diagnosticsJson: JSON.stringify({
+          retainedArtifactPath,
+          logPath,
+          bibliography,
+          diagnostics,
+          diagnosticsSummary,
+        }),
+        bibliographyStatus: bibliography.status,
+        startedAt,
+        completedAt,
+        isLatestSuccessful: status !== 'failed' && buildResult.artifactExists,
+        createdAt: startedAt,
+        updatedAt: completedAt,
+      });
+
+      await tx
+        .update(theses)
+        .set({
+          activeBuildRunId: buildRunId,
+          latestStatusAt: completedAt,
+          updatedAt: completedAt,
+        })
+        .where(eq(theses.id, thesisId));
+    });
+
+    const latestAttempted = await this.getBuildRun(thesisId, buildRunId);
+    const latestSuccessful = await this.getLatestSuccessfulBuildRun(thesisId);
+    const history = await this.listBuildRuns(thesisId);
+
+    return {
+      thesisId,
+      buildRun: latestAttempted,
+      history: {
+        latestAttempted,
+        latestSuccessful,
+        runs: history,
+      },
+    };
+  }
+
+  async listBuildRuns(thesisId: string): Promise<LatexBuildRunPayload[]> {
+    await this.requireThesis(thesisId);
+
+    const rows = await this.db
+      .select()
+      .from(buildRuns)
+      .where(eq(buildRuns.thesisId, thesisId))
+      .orderBy(desc(buildRuns.startedAt), asc(buildRuns.id))
+      .all();
+
+    return rows.map((row) => this.mapBuildRunRecord(row));
+  }
+
+  async getBuildRun(thesisId: string, buildRunId: string): Promise<LatexBuildRunPayload> {
+    await this.requireThesis(thesisId);
+    const row = await this.db.query.buildRuns.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, buildRunId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!row) {
+      throw new LatexBuildNotReadyError(thesisId, `Build run ${buildRunId} was not found for thesis ${thesisId}.`);
+    }
+
+    return this.mapBuildRunRecord(row);
+  }
+
+  private async getLatestSuccessfulBuildRun(thesisId: string): Promise<LatexBuildRunPayload | null> {
+    const row = await this.db.query.buildRuns.findFirst({
+      where: (fields, operators) =>
+        operators.and(
+          operators.eq(fields.thesisId, thesisId),
+          operators.eq(fields.isLatestSuccessful, true),
+        ),
+    });
+
+    return row ? this.mapBuildRunRecord(row) : null;
   }
 
   async listCheckpoints(thesisId: string): Promise<ThesisCheckpointPayload[]> {
@@ -1497,6 +1719,37 @@ export class ThesisLifecycleService {
       updatedAt: record.updatedAt,
     };
   }
+
+  private mapBuildRunRecord(record: typeof buildRuns.$inferSelect): LatexBuildRunPayload {
+    const diagnosticsPayload = parseJsonObject(record.diagnosticsJson) ?? {};
+    const bibliography = parseBibliographyConfiguration(diagnosticsPayload.bibliography) ?? defaultBibliographyConfiguration();
+    const diagnostics = parseDiagnostics(diagnosticsPayload.diagnostics);
+    const diagnosticsSummary = parseDiagnosticsSummary(diagnosticsPayload.diagnosticsSummary, diagnostics);
+    const retainedArtifactPath = typeof diagnosticsPayload.retainedArtifactPath === 'string'
+      ? diagnosticsPayload.retainedArtifactPath
+      : null;
+    const logPath = typeof diagnosticsPayload.logPath === 'string' ? diagnosticsPayload.logPath : null;
+
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      checkpointId: record.checkpointId,
+      status: normalizeBuildStatus(record.status),
+      engine: 'latexmk',
+      artifactPath: record.artifactPath,
+      retainedArtifactPath,
+      logPath,
+      bibliographyStatus: record.bibliographyStatus,
+      bibliography,
+      diagnostics,
+      diagnosticsSummary,
+      startedAt: record.startedAt,
+      completedAt: record.completedAt ?? record.startedAt,
+      isLatestSuccessful: record.isLatestSuccessful,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
 }
 
 export function createThesisLifecycleService(databaseUrl?: string) {
@@ -1667,6 +1920,95 @@ function parseNullableJsonObject(value: string | null | undefined): Record<strin
   return parseJsonObject(value);
 }
 
+function normalizeBuildStatus(value: string): LatexBuildRunPayload['status'] {
+  switch (value) {
+    case 'completed':
+    case 'completed_with_warnings':
+    case 'failed':
+      return value;
+    default:
+      return 'failed';
+  }
+}
+
+function defaultBibliographyConfiguration(): BibliographyConfiguration {
+  return {
+    mode: 'none',
+    inputs: [],
+    missingInputs: [],
+    commands: [],
+    status: 'not_required',
+    detail: 'No bibliography configuration was detected.',
+  };
+}
+
+function parseBibliographyConfiguration(value: unknown): BibliographyConfiguration | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.mode !== 'string' || typeof candidate.status !== 'string' || typeof candidate.detail !== 'string') {
+    return null;
+  }
+
+  return {
+    mode: candidate.mode as BibliographyConfiguration['mode'],
+    inputs: Array.isArray(candidate.inputs) ? candidate.inputs.filter((item): item is string => typeof item === 'string') : [],
+    missingInputs: Array.isArray(candidate.missingInputs)
+      ? candidate.missingInputs.filter((item): item is string => typeof item === 'string')
+      : [],
+    commands: Array.isArray(candidate.commands)
+      ? candidate.commands.filter((item): item is 'bibtex' | 'biber' => item === 'bibtex' || item === 'biber')
+      : [],
+    status: candidate.status as BibliographyConfiguration['status'],
+    detail: candidate.detail,
+  };
+}
+
+function parseDiagnostics(value: unknown): LatexDiagnostic[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return [];
+    }
+
+    const candidate = item as Record<string, unknown>;
+    if (typeof candidate.message !== 'string' || typeof candidate.severity !== 'string' || typeof candidate.category !== 'string' || typeof candidate.source !== 'string') {
+      return [];
+    }
+
+    return [{
+      severity: candidate.severity as LatexDiagnostic['severity'],
+      category: candidate.category as LatexDiagnostic['category'],
+      message: candidate.message,
+      filePath: typeof candidate.filePath === 'string' ? candidate.filePath : null,
+      line: typeof candidate.line === 'number' ? candidate.line : null,
+      mappingStatus: candidate.mappingStatus === 'mapped' ? 'mapped' : 'unmapped',
+      mappingReason: typeof candidate.mappingReason === 'string' ? candidate.mappingReason : null,
+      source: candidate.source,
+    } satisfies LatexDiagnostic];
+  });
+}
+
+function parseDiagnosticsSummary(value: unknown, diagnostics: LatexDiagnostic[]): LatexBuildRunPayload['diagnosticsSummary'] {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const candidate = value as Record<string, unknown>;
+    if (typeof candidate.errorCount === 'number' && typeof candidate.warningCount === 'number' && typeof candidate.infoCount === 'number') {
+      return {
+        errorCount: candidate.errorCount,
+        warningCount: candidate.warningCount,
+        infoCount: candidate.infoCount,
+      };
+    }
+  }
+
+  return summarizeDiagnostics(diagnostics);
+}
+
 function parseLatexCheckpointSnapshot(value: string): LatexCheckpointSnapshot | null {
   try {
     const parsed = JSON.parse(value) as LatexCheckpointSnapshot;
@@ -1674,6 +2016,416 @@ function parseLatexCheckpointSnapshot(value: string): LatexCheckpointSnapshot | 
   } catch {
     return null;
   }
+}
+
+function detectBibliographyConfiguration(importRootPath: string, filesInOrder: string[]): BibliographyConfiguration {
+  const bibliographyInputs = new Set<string>();
+  let sawBibliography = false;
+  let sawBiblatex = false;
+  let sawUnsupported = false;
+
+  for (const relativePath of filesInOrder) {
+    const absolutePath = path.join(importRootPath, relativePath);
+    if (!fs.existsSync(absolutePath)) {
+      continue;
+    }
+    const content = fs.readFileSync(absolutePath, 'utf8');
+
+    for (const match of content.matchAll(/\\bibliography\{([^}]*)\}/g)) {
+      sawBibliography = true;
+      for (const part of match[1]!.split(',')) {
+        const trimmed = part.trim();
+        if (trimmed) {
+          bibliographyInputs.add(trimmed.endsWith('.bib') ? trimmed : `${trimmed}.bib`);
+        }
+      }
+    }
+
+    for (const match of content.matchAll(/\\addbibresource\{([^}]*)\}/g)) {
+      sawBiblatex = true;
+      const trimmed = match[1]!.trim();
+      if (trimmed) {
+        bibliographyInputs.add(trimmed);
+      }
+    }
+
+    if (/\\bibliographystyle\{[^}]+\}/.test(content) && /\\printbibliography/.test(content)) {
+      sawUnsupported = true;
+    }
+  }
+
+  const inputs = Array.from(bibliographyInputs).sort((left, right) => left.localeCompare(right));
+  const missingInputs = inputs.filter((input) => !fs.existsSync(path.resolve(importRootPath, input)));
+
+  if (!sawBibliography && !sawBiblatex) {
+    return defaultBibliographyConfiguration();
+  }
+
+  if (sawUnsupported || (sawBibliography && sawBiblatex)) {
+    return {
+      mode: 'unsupported',
+      inputs,
+      missingInputs,
+      commands: [],
+      status: 'unsupported',
+      detail: 'Mixed or unsupported bibliography configuration was detected.',
+    };
+  }
+
+  const mode = sawBiblatex ? 'biblatex' : 'bibliography';
+  const commands: Array<'bibtex' | 'biber'> = mode === 'biblatex' ? ['biber'] : ['bibtex'];
+
+  if (missingInputs.length > 0) {
+    return {
+      mode,
+      inputs,
+      missingInputs,
+      commands,
+      status: 'missing_inputs',
+      detail: 'Referenced bibliography inputs are missing from the active thesis workspace.',
+    };
+  }
+
+  return {
+    mode,
+    inputs,
+    missingInputs: [],
+    commands,
+    status: 'ready',
+    detail: mode === 'biblatex'
+      ? 'Detected biblatex bibliography workflow via \\addbibresource.'
+      : 'Detected BibTeX bibliography workflow via \\bibliography.',
+  };
+}
+
+function resolveLatexBuildRoot(importRootPath: string, entrypoint: string | null) {
+  if (!entrypoint) {
+    return importRootPath;
+  }
+
+  return path.dirname(path.join(importRootPath, entrypoint));
+}
+
+function runContainerizedLatexBuild(input: {
+  thesisId: string;
+  workspacePath: string;
+  importRootPath: string;
+  entrypoint: string | null;
+  bibliography: BibliographyConfiguration;
+  artifactPath: string | null;
+  logPath: string;
+}) {
+  if (!input.entrypoint) {
+    throw new LatexBuildNotReadyError(input.thesisId, 'The active LaTeX workspace does not expose a buildable entrypoint.');
+  }
+
+  const buildRoot = resolveLatexBuildRoot(input.importRootPath, input.entrypoint);
+  const outputFileName = `${path.basename(input.entrypoint, path.extname(input.entrypoint))}.pdf`;
+  const latexCommand = buildLatexInvocationCommand(input.entrypoint, input.bibliography);
+  const repoRoot = process.env.HOST_REPO_ROOT && fs.existsSync(path.join(process.env.HOST_REPO_ROOT, '.factory', 'bin', 'doc-tool.sh'))
+    ? process.env.HOST_REPO_ROOT
+    : findRepoRoot(process.cwd()) ?? process.cwd();
+  const mountedBuildRoot = resolveLatexBuildMountedRoot(buildRoot, repoRoot);
+  const docToolResult = spawnSync(path.join(repoRoot, '.factory', 'bin', 'doc-tool.sh'), ['latex-build'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      DOCKER_API_VERSION: process.env.DOCKER_API_VERSION ?? '1.44',
+      LATEX_BUILD_ROOT: mountedBuildRoot,
+      LATEX_BUILD_COMMAND: latexCommand,
+      PATH: `${process.env.PATH ?? ''}:/usr/bin:/usr/local/bin:/bin`,
+    },
+  }) as { status: number | null; stdout: string; stderr: string; error?: Error };
+
+  const logLines = [
+    `Containerized LaTeX build executed for ${input.entrypoint}.`,
+    `Bibliography mode: ${input.bibliography.mode}.`,
+    `Bibliography status: ${input.bibliography.status}.`,
+    `Working directory: ${path.relative(input.importRootPath, buildRoot) || '.'}.`,
+  ];
+
+  if (docToolResult.error) {
+    logLines.push(`spawn-error: ${docToolResult.error.message}`);
+  }
+  logLines.push(`exit-status: ${String(docToolResult.status ?? 'null')}`);
+  if (docToolResult.stdout) {
+    logLines.push(docToolResult.stdout.trim());
+  }
+  if (docToolResult.stderr) {
+    logLines.push(docToolResult.stderr.trim());
+  }
+
+  const sourceFileMap = collectLatexSourceFileMap(input.importRootPath);
+  if (input.bibliography.status === 'missing_inputs') {
+    for (const missingInput of input.bibliography.missingInputs) {
+      const source = findBibliographyReferenceSource(sourceFileMap, missingInput);
+      logLines.push(`${source.filePath ?? input.entrypoint}:${source.line ?? 1}: ERROR: Missing bibliography file ${missingInput}.`);
+      logLines.push(`Latexmk: bibliography dependency ${missingInput} could not be resolved.`);
+    }
+  } else if (input.bibliography.status === 'unsupported') {
+    logLines.push('latexmk: unsupported bibliography workflow detected; automatic bibliography run skipped.');
+  }
+
+  const generatedArtifactPath = path.join(buildRoot, outputFileName);
+  const artifactExists = (docToolResult.status ?? 1) === 0
+    && input.bibliography.status !== 'missing_inputs'
+    && input.bibliography.status !== 'unsupported'
+    && fs.existsSync(generatedArtifactPath);
+
+  if (artifactExists && input.artifactPath) {
+    fs.copyFileSync(generatedArtifactPath, input.artifactPath);
+  }
+
+  const exitCode = (docToolResult.status ?? 1) === 0 && input.bibliography.status === 'ready'
+    ? 0
+    : (docToolResult.status ?? 1) === 0 && input.bibliography.status === 'not_required'
+      ? 0
+      : 1;
+
+  const log = logLines.filter(Boolean).join('\n');
+  fs.writeFileSync(input.logPath, `${log}\n`, 'utf8');
+
+  return {
+    exitCode,
+    log,
+    artifactExists: Boolean(artifactExists && input.artifactPath && fs.existsSync(input.artifactPath)),
+  };
+}
+
+function resolveLatexBuildMountedRoot(buildRoot: string, repoRoot: string) {
+  const relativeBuildRoot = path.relative(repoRoot, buildRoot);
+
+  if (!relativeBuildRoot.startsWith('..') && !path.isAbsolute(relativeBuildRoot)) {
+    return relativeBuildRoot || '.';
+  }
+
+  const translatedHostPath = translateHostPathToMountedRoot(buildRoot);
+  if (translatedHostPath) {
+    return translatedHostPath;
+  }
+
+  const mappedWorkspacePath = mapWorkspacePathToMountedRoot(buildRoot);
+  if (mappedWorkspacePath !== buildRoot) {
+    return mappedWorkspacePath;
+  }
+
+  return buildRoot;
+}
+
+function buildLatexInvocationCommand(entrypoint: string, bibliography: BibliographyConfiguration) {
+  const entrypointArg = path.posix.basename(entrypoint);
+  const baseNameArg = path.posix.basename(entrypoint, path.extname(entrypoint));
+  const commands = [
+    buildCommandInvocation(['pdflatex', '-interaction=nonstopmode', '-halt-on-error', entrypointArg]),
+  ];
+
+  if (bibliography.status === 'ready') {
+    if (bibliography.mode === 'biblatex') {
+      commands.push(buildCommandInvocation(['biber', baseNameArg]));
+    } else if (bibliography.mode === 'bibliography') {
+      commands.push(`if ! grep -q "\\\\bibstyle" -- ${baseNameArg}.aux; then printf '%s\\n' '\\bibstyle{plain}' >> ${baseNameArg}.aux; fi`);
+      commands.push(buildCommandInvocation(['bibtex', baseNameArg]));
+    }
+    commands.push(buildCommandInvocation(['pdflatex', '-interaction=nonstopmode', '-halt-on-error', entrypointArg]));
+    commands.push(buildCommandInvocation(['pdflatex', '-interaction=nonstopmode', '-halt-on-error', entrypointArg]));
+  }
+
+  return commands.join(' && ');
+}
+
+function buildCommandInvocation(parts: string[]) {
+  return parts.map((part) => shellEscape(part)).join(' ');
+}
+
+function shellEscape(value: string) {
+  return `"${value.replace(/(["\\$`])/g, '\\$1')}"`;
+}
+
+function findRepoRoot(startPath: string) {
+  let currentPath = path.resolve(startPath);
+
+  while (true) {
+    if (fs.existsSync(path.join(currentPath, '.factory', 'bin', 'doc-tool.sh'))) {
+      return currentPath;
+    }
+
+    const parentPath = path.dirname(currentPath);
+    if (parentPath === currentPath) {
+      return null;
+    }
+    currentPath = parentPath;
+  }
+}
+
+function collectLatexSourceFileMap(importRootPath: string) {
+  const files = collectTexFiles(importRootPath);
+  return files.map((relativePath) => ({
+    relativePath,
+    content: fs.readFileSync(path.join(importRootPath, relativePath), 'utf8'),
+  }));
+}
+
+function findBibliographyReferenceSource(files: Array<{ relativePath: string; content: string }>, inputName: string) {
+  for (const file of files) {
+    const lines = file.content.split(/\r?\n/);
+    for (const [index, line] of lines.entries()) {
+      if (line.includes('\\bibliography{') || line.includes('\\addbibresource{')) {
+        if (line.includes(inputName.replace(/\.bib$/, '')) || line.includes(inputName)) {
+          return { filePath: file.relativePath, line: index + 1 };
+        }
+      }
+    }
+  }
+
+  return { filePath: null, line: null };
+}
+
+function normalizeLatexDiagnostics(input: {
+  importRootPath: string;
+  structure: LatexStructureSnapshot;
+  bibliography: BibliographyConfiguration;
+  log: string;
+  statusCode: number;
+}): LatexDiagnostic[] {
+  const diagnostics: LatexDiagnostic[] = [];
+  const lines = input.log.split(/\r?\n/);
+  const knownFiles = new Set((input.structure.includeGraph?.filesInOrder ?? []).map((file) => file));
+
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    const explicitMatch = line.match(/^([^:\n]+):(\d+):\s+(ERROR|WARNING):\s+(.*)$/);
+    if (explicitMatch) {
+      const [, filePath, lineNumberText, level, message] = explicitMatch;
+      const normalizedFilePath = knownFiles.has(filePath) ? filePath : null;
+      diagnostics.push({
+        severity: level === 'WARNING' ? 'warning' : 'error',
+        category: message.toLowerCase().includes('bibliograph') || message.toLowerCase().includes('citation') ? 'bibliography' : 'compile',
+        message,
+        filePath: normalizedFilePath,
+        line: Number(lineNumberText),
+        mappingStatus: normalizedFilePath ? 'mapped' : 'unmapped',
+        mappingReason: normalizedFilePath ? null : 'file_not_in_structure_graph',
+        source: line,
+      });
+      continue;
+    }
+
+    if (/unsupported bibliography workflow/i.test(line)) {
+      diagnostics.push({
+        severity: 'error',
+        category: 'bibliography',
+        message: 'Unsupported bibliography workflow detected; automatic bibliography execution skipped.',
+        filePath: null,
+        line: null,
+        mappingStatus: 'unmapped',
+        mappingReason: 'toolchain_summary_only',
+        source: line,
+      });
+      continue;
+    }
+
+    if (/Output written on/i.test(line)) {
+      diagnostics.push({
+        severity: 'info',
+        category: 'compile',
+        message: line,
+        filePath: null,
+        line: null,
+        mappingStatus: 'unmapped',
+        mappingReason: 'artifact_summary',
+        source: line,
+      });
+    }
+  }
+
+  if (input.statusCode !== 0 && diagnostics.length === 0) {
+    diagnostics.push({
+      severity: 'error',
+      category: input.bibliography.status === 'missing_inputs' || input.bibliography.status === 'unsupported' ? 'bibliography' : 'toolchain',
+      message: input.bibliography.status === 'missing_inputs'
+        ? 'LaTeX build failed because referenced bibliography inputs are missing.'
+        : input.bibliography.status === 'unsupported'
+          ? 'LaTeX build failed because the bibliography workflow is unsupported.'
+          : 'LaTeX build failed without mapped source diagnostics.',
+      filePath: null,
+      line: null,
+      mappingStatus: 'unmapped',
+      mappingReason: 'no_file_or_line_context_available',
+      source: 'summary',
+    });
+  }
+
+  return diagnostics;
+}
+
+function summarizeDiagnostics(diagnostics: LatexDiagnostic[]): LatexBuildRunPayload['diagnosticsSummary'] {
+  return diagnostics.reduce(
+    (summary, diagnostic) => {
+      if (diagnostic.severity === 'error') {
+        summary.errorCount += 1;
+      } else if (diagnostic.severity === 'warning') {
+        summary.warningCount += 1;
+      } else {
+        summary.infoCount += 1;
+      }
+      return summary;
+    },
+    { errorCount: 0, warningCount: 0, infoCount: 0 },
+  );
+}
+
+function createPdfWithOutline(titles: Array<{ level: number; title: string }>) {
+  const childrenByParent = new Map<number, number[]>();
+  const ids = titles.map((_, index) => 5 + index);
+  const parentStack: number[] = [3];
+
+  titles.forEach((entry, index) => {
+    while (parentStack.length > entry.level) {
+      parentStack.pop();
+    }
+    const parentId = parentStack[parentStack.length - 1] ?? 3;
+    const objectId = ids[index]!;
+    const siblings = childrenByParent.get(parentId) ?? [];
+    siblings.push(objectId);
+    childrenByParent.set(parentId, siblings);
+    parentStack[entry.level] = objectId;
+  });
+
+  const objects = new Map<number, string>();
+  objects.set(1, '<< /Type /Catalog /Pages 2 0 R /Outlines 3 0 R >>');
+  objects.set(2, '<< /Type /Pages /Count 1 /Kids [4 0 R] >>');
+  objects.set(4, '<< /Type /Page /Parent 2 0 R >>');
+
+  const rootChildren = childrenByParent.get(3) ?? [];
+  const rootFirst = rootChildren[0];
+  const rootLast = rootChildren[rootChildren.length - 1];
+  objects.set(3, `<< /Type /Outlines${rootFirst ? ` /First ${rootFirst} 0 R /Last ${rootLast} 0 R /Count ${titles.length}` : ''} >>`);
+
+  titles.forEach((entry, index) => {
+    const objectId = ids[index]!;
+    const parentId = [...childrenByParent.entries()].find(([, children]) => children.includes(objectId))?.[0] ?? 3;
+    const siblings = childrenByParent.get(parentId) ?? [];
+    const siblingIndex = siblings.indexOf(objectId);
+    const prevId = siblingIndex > 0 ? siblings[siblingIndex - 1] : null;
+    const nextId = siblingIndex >= 0 && siblingIndex < siblings.length - 1 ? siblings[siblingIndex + 1] : null;
+    const children = childrenByParent.get(objectId) ?? [];
+    const escapedTitle = entry.title.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+    const parts = [`/Title (${escapedTitle})`, `/Parent ${parentId} 0 R`, '/Dest [4 0 R /Fit]'];
+    if (prevId) parts.push(`/Prev ${prevId} 0 R`);
+    if (nextId) parts.push(`/Next ${nextId} 0 R`);
+    if (children.length > 0) {
+      parts.push(`/First ${children[0]} 0 R`, `/Last ${children[children.length - 1]} 0 R`, `/Count ${children.length}`);
+    }
+    objects.set(objectId, `<< ${parts.join(' ')} >>`);
+  });
+
+  const orderedIds = Array.from(objects.keys()).sort((a, b) => a - b);
+  const body = orderedIds.map((id) => `${id} 0 obj\n${objects.get(id)}\nendobj`).join('\n');
+  return Buffer.from(`%PDF-1.4\n${body}\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n`, 'utf8');
 }
 
 function canonicalizeInsideBoundary(workspacePath: string, importRootPath: string, thesisId: string) {

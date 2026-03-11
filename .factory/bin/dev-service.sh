@@ -36,11 +36,12 @@ case "$MODE" in
       -p "${PORT}:${PORT}" \
       -v "$ROOT:$WORKDIR" \
       -v "/tmp:/tmp" \
+      -v /var/run/docker.sock:/var/run/docker.sock \
       -w "$WORKDIR" \
       -e "$ENV_NAME=$PORT" \
       -e "HOST_REPO_ROOT=$HOST_REPO_ROOT_VALUE" \
       "$IMAGE" \
-      bash -lc "corepack enable && if [ ! -f package.json ]; then echo 'package.json missing' >&2; exit 1; fi; pnpm install --frozen-lockfile=false && pnpm run $SCRIPT"
+      bash -lc "export DEBIAN_FRONTEND=noninteractive && if ! command -v docker >/dev/null 2>&1; then apt-get update >/dev/null && apt-get install -y docker.io >/dev/null; fi && corepack enable && if [ ! -f package.json ]; then echo 'package.json missing' >&2; exit 1; fi; pnpm install --frozen-lockfile=false && pnpm run $SCRIPT"
     ;;
   stop)
     docker rm -f "$NAME" >/dev/null 2>&1 || true
