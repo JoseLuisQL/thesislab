@@ -2216,22 +2216,26 @@ function resolveLatexBuildMountedRoot(buildRoot: string, repoRoot: string) {
 function buildLatexInvocationCommand(entrypoint: string, bibliography: BibliographyConfiguration) {
   const entrypointArg = path.posix.basename(entrypoint);
   const baseNameArg = path.posix.basename(entrypoint, path.extname(entrypoint));
+  const latexEngine = bibliography.mode === 'biblatex' ? 'lualatex' : 'pdflatex';
   const commands = [
-    buildCommandInvocation(['pdflatex', '-interaction=nonstopmode', '-halt-on-error', entrypointArg]),
+    buildCommandInvocation([latexEngine, '-interaction=nonstopmode', '-halt-on-error', entrypointArg]),
   ];
 
   if (bibliography.status === 'ready') {
     if (bibliography.mode === 'biblatex') {
       commands.push(buildCommandInvocation(['biber', baseNameArg]));
     } else if (bibliography.mode === 'bibliography') {
-      commands.push(`if ! grep -q "\\\\bibstyle" -- ${baseNameArg}.aux; then printf '%s\\n' '\\bibstyle{plain}' >> ${baseNameArg}.aux; fi`);
+      commands.push(`if ! grep -q "\\\\bibstyle" -- ${shellEscape(`${baseNameArg}.aux`)}; then printf '%s\\n' '\\bibstyle{plain}' >> ${shellEscape(`${baseNameArg}.aux`)}; fi`);
       commands.push(buildCommandInvocation(['bibtex', baseNameArg]));
     }
-    commands.push(buildCommandInvocation(['pdflatex', '-interaction=nonstopmode', '-halt-on-error', entrypointArg]));
-    commands.push(buildCommandInvocation(['pdflatex', '-interaction=nonstopmode', '-halt-on-error', entrypointArg]));
+    commands.push(buildCommandInvocation([latexEngine, '-interaction=nonstopmode', '-halt-on-error', entrypointArg]));
+    commands.push(buildCommandInvocation([latexEngine, '-interaction=nonstopmode', '-halt-on-error', entrypointArg]));
   }
 
-  return commands.join(' && ');
+  return [
+    'export PATH="/opt/texlive/texdir/bin/x86_64-linuxmusl:$PATH"; set -e',
+    ...commands,
+  ].join('; ');
 }
 
 function buildCommandInvocation(parts: string[]) {
@@ -2359,6 +2363,20 @@ function normalizeLatexDiagnostics(input: {
     });
   }
 
+
+  if (!diagnostics.some((diagnostic) => diagnostic.severity === 'info')) {
+    const outputLine = lines.find((line) => /Output written on/i.test(line));
+    diagnostics.push({
+      severity: 'info',
+      category: 'compile',
+      message: outputLine ?? `LaTeX build ${input.statusCode === 0 ? 'completed' : 'finished with errors'} for ${input.structure.entrypoint ?? 'the active entrypoint'}.`,
+      filePath: null,
+      line: null,
+      mappingStatus: 'unmapped',
+      mappingReason: outputLine ? 'artifact_summary' : 'build_summary',
+      source: outputLine ?? input.log,
+    });
+  }
   return diagnostics;
 }
 
