@@ -509,6 +509,170 @@ type SourceIngestStatus = 'not_started' | 'queued' | 'succeeded' | 'degraded' | 
 type SourceDuplicateState = 'unique' | 'duplicate';
 type PdfExtractionStatus = 'not_attempted' | 'succeeded' | 'degraded' | 'failed';
 
+type ZoteroConnectorMode = 'mock' | 'test' | 'live';
+
+export type ZoteroLibraryPayload = {
+  id: string;
+  key: string;
+  mode: ZoteroConnectorMode;
+  externalId: string;
+  name: string;
+  kind: 'user' | 'group';
+  itemCount: number;
+  collectionCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ZoteroCollectionPayload = {
+  id: string;
+  key: string;
+  mode: ZoteroConnectorMode;
+  externalId: string;
+  libraryId: string;
+  libraryKey: string;
+  parentCollectionKey: string | null;
+  name: string;
+  path: string[];
+  itemCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ZoteroItemPayload = {
+  id: string;
+  key: string;
+  mode: ZoteroConnectorMode;
+  externalId: string;
+  libraryId: string;
+  libraryKey: string;
+  collectionKeys: string[];
+  itemType: string;
+  title: string;
+  creators: string[];
+  date: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ZoteroMockLibraryRecord = {
+  key: string;
+  name: string;
+  kind: 'user' | 'group';
+  itemCount: number;
+  collectionCount: number;
+};
+
+type ZoteroMockCollectionRecord = {
+  key: string;
+  libraryKey: string;
+  parentCollectionKey: string | null;
+  name: string;
+  path: string[];
+  itemCount: number;
+};
+
+type ZoteroMockItemRecord = {
+  key: string;
+  libraryKey: string;
+  collectionKeys: string[];
+  itemType: string;
+  title: string;
+  creators: string[];
+  date: string | null;
+};
+
+type ZoteroMockDataset = {
+  libraries: ZoteroMockLibraryRecord[];
+  collections: ZoteroMockCollectionRecord[];
+  items: ZoteroMockItemRecord[];
+};
+
+const DEFAULT_ZOTERO_CONNECTOR_MODE: ZoteroConnectorMode = 'mock';
+
+const DEFAULT_ZOTERO_DATASET: ZoteroMockDataset = {
+  libraries: [
+    {
+      key: 'lib-user-main',
+      name: 'Main Research Library',
+      kind: 'user',
+      itemCount: 3,
+      collectionCount: 2,
+    },
+    {
+      key: 'lib-group-thesis-lab',
+      name: 'Thesis Lab Group Library',
+      kind: 'group',
+      itemCount: 1,
+      collectionCount: 1,
+    },
+  ],
+  collections: [
+    {
+      key: 'col-ml-core',
+      libraryKey: 'lib-user-main',
+      parentCollectionKey: null,
+      name: 'Machine Learning Core',
+      path: ['Machine Learning Core'],
+      itemCount: 2,
+    },
+    {
+      key: 'col-ml-methods',
+      libraryKey: 'lib-user-main',
+      parentCollectionKey: 'col-ml-core',
+      name: 'Methods',
+      path: ['Machine Learning Core', 'Methods'],
+      itemCount: 1,
+    },
+    {
+      key: 'col-group-bibliography',
+      libraryKey: 'lib-group-thesis-lab',
+      parentCollectionKey: null,
+      name: 'Shared Bibliography',
+      path: ['Shared Bibliography'],
+      itemCount: 1,
+    },
+  ],
+  items: [
+    {
+      key: 'item-traceability-2024',
+      libraryKey: 'lib-user-main',
+      collectionKeys: ['col-ml-core'],
+      itemType: 'journalArticle',
+      title: 'Traceable Evidence in AI Research',
+      creators: ['Ada Lovelace', 'Grace Hopper'],
+      date: '2024',
+    },
+    {
+      key: 'item-methods-2023',
+      libraryKey: 'lib-user-main',
+      collectionKeys: ['col-ml-core', 'col-ml-methods'],
+      itemType: 'book',
+      title: 'Research Methods for Thesis Workflows',
+      creators: ['Elena Method'],
+      date: '2023',
+    },
+    {
+      key: 'item-zotero-schema-2026',
+      libraryKey: 'lib-user-main',
+      collectionKeys: [],
+      itemType: 'report',
+      title: 'Stable Zotero Normalization Schema',
+      creators: ['Schema Team'],
+      date: '2026-02-01',
+    },
+    {
+      key: 'item-group-citations-2022',
+      libraryKey: 'lib-group-thesis-lab',
+      collectionKeys: ['col-group-bibliography'],
+      itemType: 'conferencePaper',
+      title: 'Collaborative Citation Workflows',
+      creators: ['María Citation'],
+      date: '2022',
+    },
+  ],
+};
+
 export type SourcePayload = {
   id: string;
   thesisId: string;
@@ -588,6 +752,17 @@ export type ClaimPayload = {
   };
   createdAt: string;
   updatedAt: string;
+};
+
+export type ListZoteroItemsInput = {
+  libraryKey?: string | null;
+  collectionKey?: string | null;
+};
+
+export type SearchZoteroItemsInput = {
+  query: string;
+  libraryKey?: string | null;
+  collectionKey?: string | null;
 };
 
 export type RegisterSourceInput = {
@@ -772,6 +947,33 @@ export class LatexBuildNotReadyError extends Error {
 
 export class ThesisLifecycleService {
   constructor(private readonly db: ThesisDbClient) {}
+
+  async listZoteroLibraries(): Promise<ZoteroLibraryPayload[]> {
+    const connector = createZoteroMockConnector();
+    return connector.listLibraries();
+  }
+
+  async listZoteroCollections(libraryKey?: string | null): Promise<ZoteroCollectionPayload[]> {
+    const connector = createZoteroMockConnector();
+    return connector.listCollections({ libraryKey: libraryKey ?? null });
+  }
+
+  async listZoteroItems(input: ListZoteroItemsInput = {}): Promise<ZoteroItemPayload[]> {
+    const connector = createZoteroMockConnector();
+    return connector.listItems({
+      libraryKey: input.libraryKey ?? null,
+      collectionKey: input.collectionKey ?? null,
+    });
+  }
+
+  async searchZoteroItems(input: SearchZoteroItemsInput): Promise<ZoteroItemPayload[]> {
+    const connector = createZoteroMockConnector();
+    return connector.searchItems({
+      query: input.query,
+      libraryKey: input.libraryKey ?? null,
+      collectionKey: input.collectionKey ?? null,
+    });
+  }
 
   async createThesis(input: CreateThesisInput): Promise<ThesisDetailPayload> {
     const now = new Date().toISOString();
@@ -3012,6 +3214,122 @@ function parseNullableJsonObject(value: string | null | undefined): Record<strin
   }
 
   return parseJsonObject(value);
+}
+
+function resolveZoteroConnectorMode(): ZoteroConnectorMode {
+  const configuredMode = process.env.ZOTERO_CONNECTOR_MODE?.trim();
+  switch (configuredMode) {
+    case 'mock':
+    case 'test':
+    case 'live':
+      return configuredMode;
+    default:
+      return DEFAULT_ZOTERO_CONNECTOR_MODE;
+  }
+}
+
+function createZoteroMockConnector() {
+  const mode = resolveZoteroConnectorMode();
+  const dataset = DEFAULT_ZOTERO_DATASET;
+  const timestamp = '2026-03-11T00:00:00.000Z';
+
+  const mapLibrary = (record: ZoteroMockLibraryRecord): ZoteroLibraryPayload => ({
+    id: record.key,
+    key: record.key,
+    mode,
+    externalId: record.key,
+    name: record.name,
+    kind: record.kind,
+    itemCount: record.itemCount,
+    collectionCount: record.collectionCount,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+
+  const mapCollection = (record: ZoteroMockCollectionRecord): ZoteroCollectionPayload => ({
+    id: record.key,
+    key: record.key,
+    mode,
+    externalId: record.key,
+    libraryId: record.libraryKey,
+    libraryKey: record.libraryKey,
+    parentCollectionKey: record.parentCollectionKey,
+    name: record.name,
+    path: [...record.path],
+    itemCount: record.itemCount,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+
+  const mapItem = (record: ZoteroMockItemRecord): ZoteroItemPayload => ({
+    id: record.key,
+    key: record.key,
+    mode,
+    externalId: record.key,
+    libraryId: record.libraryKey,
+    libraryKey: record.libraryKey,
+    collectionKeys: [...record.collectionKeys],
+    itemType: record.itemType,
+    title: record.title,
+    creators: [...record.creators],
+    date: record.date,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+
+  const filterItems = (items: ZoteroMockItemRecord[], filter: { libraryKey?: string | null; collectionKey?: string | null }) =>
+    items.filter((item) => {
+      if (filter.libraryKey && item.libraryKey !== filter.libraryKey) {
+        return false;
+      }
+
+      if (filter.collectionKey && !item.collectionKeys.includes(filter.collectionKey)) {
+        return false;
+      }
+
+      return true;
+    });
+
+  return {
+    listLibraries(): ZoteroLibraryPayload[] {
+      return dataset.libraries
+        .slice()
+        .sort((left, right) => left.name.localeCompare(right.name) || left.key.localeCompare(right.key))
+        .map(mapLibrary);
+    },
+
+    listCollections(filter: { libraryKey?: string | null } = {}): ZoteroCollectionPayload[] {
+      return dataset.collections
+        .filter((collection) => !filter.libraryKey || collection.libraryKey === filter.libraryKey)
+        .slice()
+        .sort((left, right) => left.path.join(' / ').localeCompare(right.path.join(' / ')) || left.key.localeCompare(right.key))
+        .map(mapCollection);
+    },
+
+    listItems(filter: { libraryKey?: string | null; collectionKey?: string | null } = {}): ZoteroItemPayload[] {
+      return filterItems(dataset.items, filter)
+        .slice()
+        .sort((left, right) => left.title.localeCompare(right.title) || left.key.localeCompare(right.key))
+        .map(mapItem);
+    },
+
+    searchItems(filter: { query: string; libraryKey?: string | null; collectionKey?: string | null }): ZoteroItemPayload[] {
+      const query = filter.query.trim().toLocaleLowerCase();
+
+      return filterItems(dataset.items, filter)
+        .filter((item) => {
+          if (!query) {
+            return true;
+          }
+
+          const haystack = [item.title, item.itemType, item.date ?? '', ...item.creators].join(' ').toLocaleLowerCase();
+          return haystack.includes(query);
+        })
+        .slice()
+        .sort((left, right) => left.title.localeCompare(right.title) || left.key.localeCompare(right.key))
+        .map(mapItem);
+    },
+  };
 }
 
 function normalizeBuildStatus(value: string): LatexBuildRunPayload['status'] {

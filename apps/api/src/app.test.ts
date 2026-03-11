@@ -248,6 +248,213 @@ describe('GET /status/capabilities', () => {
   });
 });
 
+describe('GET /zotero/*', () => {
+  let app: ReturnType<typeof createApp>;
+
+  beforeEach(() => {
+    vi.unstubAllEnvs();
+    app = createApp();
+  });
+
+  afterAll(async () => {
+    await app?.close();
+    vi.unstubAllEnvs();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it('lists Zotero libraries, collections, and items with stable normalized fields in mock mode', async () => {
+    const [librariesResponse, collectionsResponse, itemsResponse] = await Promise.all([
+      app.inject({ method: 'GET', url: '/zotero/libraries' }),
+      app.inject({ method: 'GET', url: '/zotero/collections?libraryKey=lib-user-main' }),
+      app.inject({ method: 'GET', url: '/zotero/items?libraryKey=lib-user-main' }),
+    ]);
+
+    expect(librariesResponse.statusCode).toBe(200);
+    expect(collectionsResponse.statusCode).toBe(200);
+    expect(itemsResponse.statusCode).toBe(200);
+
+    const librariesPayload = librariesResponse.json() as {
+      libraries: Array<{
+        id: string;
+        key: string;
+        mode: string;
+        externalId: string;
+        name: string;
+        kind: string;
+        itemCount: number;
+        collectionCount: number;
+      }>;
+    };
+    const collectionsPayload = collectionsResponse.json() as {
+      collections: Array<{
+        id: string;
+        key: string;
+        mode: string;
+        externalId: string;
+        libraryId: string;
+        libraryKey: string;
+        parentCollectionKey: string | null;
+        name: string;
+        path: string[];
+        itemCount: number;
+      }>;
+    };
+    const itemsPayload = itemsResponse.json() as {
+      items: Array<{
+        id: string;
+        key: string;
+        mode: string;
+        externalId: string;
+        libraryId: string;
+        libraryKey: string;
+        collectionKeys: string[];
+        itemType: string;
+        title: string;
+        creators: string[];
+        date: string | null;
+      }>;
+    };
+
+    expect(librariesPayload.libraries).toEqual([
+      expect.objectContaining({
+        id: 'lib-user-main',
+        key: 'lib-user-main',
+        mode: 'mock',
+        externalId: 'lib-user-main',
+        name: 'Main Research Library',
+        kind: 'user',
+        itemCount: 3,
+        collectionCount: 2,
+      }),
+      expect.objectContaining({
+        id: 'lib-group-thesis-lab',
+        key: 'lib-group-thesis-lab',
+        mode: 'mock',
+        externalId: 'lib-group-thesis-lab',
+        name: 'Thesis Lab Group Library',
+        kind: 'group',
+        itemCount: 1,
+        collectionCount: 1,
+      }),
+    ]);
+
+    expect(collectionsPayload.collections).toEqual([
+      expect.objectContaining({
+        id: 'col-ml-core',
+        key: 'col-ml-core',
+        mode: 'mock',
+        externalId: 'col-ml-core',
+        libraryId: 'lib-user-main',
+        libraryKey: 'lib-user-main',
+        parentCollectionKey: null,
+        name: 'Machine Learning Core',
+        path: ['Machine Learning Core'],
+        itemCount: 2,
+      }),
+      expect.objectContaining({
+        id: 'col-ml-methods',
+        key: 'col-ml-methods',
+        mode: 'mock',
+        externalId: 'col-ml-methods',
+        libraryId: 'lib-user-main',
+        libraryKey: 'lib-user-main',
+        parentCollectionKey: 'col-ml-core',
+        name: 'Methods',
+        path: ['Machine Learning Core', 'Methods'],
+        itemCount: 1,
+      }),
+    ]);
+
+    expect(itemsPayload.items).toEqual([
+      expect.objectContaining({
+        id: 'item-methods-2023',
+        key: 'item-methods-2023',
+        mode: 'mock',
+        externalId: 'item-methods-2023',
+        libraryId: 'lib-user-main',
+        libraryKey: 'lib-user-main',
+        collectionKeys: ['col-ml-core', 'col-ml-methods'],
+        itemType: 'book',
+        title: 'Research Methods for Thesis Workflows',
+        creators: ['Elena Method'],
+        date: '2023',
+      }),
+      expect.objectContaining({
+        id: 'item-zotero-schema-2026',
+        key: 'item-zotero-schema-2026',
+        mode: 'mock',
+        externalId: 'item-zotero-schema-2026',
+        libraryId: 'lib-user-main',
+        libraryKey: 'lib-user-main',
+        collectionKeys: [],
+        itemType: 'report',
+        title: 'Stable Zotero Normalization Schema',
+        creators: ['Schema Team'],
+        date: '2026-02-01',
+      }),
+      expect.objectContaining({
+        id: 'item-traceability-2024',
+        key: 'item-traceability-2024',
+        mode: 'mock',
+        externalId: 'item-traceability-2024',
+        libraryId: 'lib-user-main',
+        libraryKey: 'lib-user-main',
+        collectionKeys: ['col-ml-core'],
+        itemType: 'journalArticle',
+        title: 'Traceable Evidence in AI Research',
+        creators: ['Ada Lovelace', 'Grace Hopper'],
+        date: '2024',
+      }),
+    ]);
+  });
+
+  it('searches Zotero items and keeps identifier semantics stable across connector modes', async () => {
+    vi.stubEnv('ZOTERO_CONNECTOR_MODE', 'test');
+
+    const searchResponse = await app.inject({
+      method: 'GET',
+      url: '/zotero/items/search?q=traceable&libraryKey=lib-user-main',
+    });
+
+    expect(searchResponse.statusCode).toBe(200);
+
+    const payload = searchResponse.json() as {
+      items: Array<{
+        id: string;
+        key: string;
+        mode: string;
+        externalId: string;
+        libraryId: string;
+        libraryKey: string;
+        collectionKeys: string[];
+        itemType: string;
+        title: string;
+        creators: string[];
+        date: string | null;
+      }>;
+    };
+
+    expect(payload.items).toEqual([
+      expect.objectContaining({
+        id: 'item-traceability-2024',
+        key: 'item-traceability-2024',
+        mode: 'test',
+        externalId: 'item-traceability-2024',
+        libraryId: 'lib-user-main',
+        libraryKey: 'lib-user-main',
+        collectionKeys: ['col-ml-core'],
+        itemType: 'journalArticle',
+        title: 'Traceable Evidence in AI Research',
+        creators: ['Ada Lovelace', 'Grace Hopper'],
+        date: '2024',
+      }),
+    ]);
+  });
+});
+
 describe('resolveRuntimeDatabaseUrl', () => {
   afterEach(() => {
     vi.unstubAllEnvs();

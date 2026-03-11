@@ -15,6 +15,7 @@ import {
   type CreateFeedbackInput,
   type CreateEvidenceFragmentInput,
   type CreateIntakeJobInput,
+  type ListZoteroItemsInput,
   ClaimEvidenceScopeError,
   ClaimEvidenceLinkNotFoundError,
   ClaimNotFoundError,
@@ -141,6 +142,19 @@ const latexEditSchema = z.object({
 
 const latexBuildSchema = z.object({
   createdBy: z.string().trim().min(1),
+});
+
+const listZoteroCollectionsSchema = z.object({
+  libraryKey: z.string().trim().min(1).optional(),
+});
+
+const listZoteroItemsSchema = z.object({
+  libraryKey: z.string().trim().min(1).optional(),
+  collectionKey: z.string().trim().min(1).optional(),
+});
+
+const searchZoteroItemsSchema = listZoteroItemsSchema.extend({
+  q: z.string().trim().min(1),
 });
 
 export function resolveRuntimeDatabaseUrl() {
@@ -336,6 +350,41 @@ export function createApp() {
   }));
 
   app.get('/status/capabilities', async () => buildLocalFirstStatusPayload());
+
+  app.get('/zotero/libraries', async () => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const libraries = await (await getThesisLifecycle()).service.listZoteroLibraries();
+
+    return { ok: true, libraries };
+  });
+
+  app.get('/zotero/collections', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const query = listZoteroCollectionsSchema.parse(request.query ?? {});
+    const collections = await (await getThesisLifecycle()).service.listZoteroCollections(query.libraryKey ?? null);
+
+    return { ok: true, collections };
+  });
+
+  app.get('/zotero/items', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const query = listZoteroItemsSchema.parse(request.query ?? {}) as ListZoteroItemsInput;
+    const items = await (await getThesisLifecycle()).service.listZoteroItems(query);
+
+    return { ok: true, items };
+  });
+
+  app.get('/zotero/items/search', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const query = searchZoteroItemsSchema.parse(request.query ?? {});
+    const items = await (await getThesisLifecycle()).service.searchZoteroItems({
+      query: query.q,
+      libraryKey: query.libraryKey ?? null,
+      collectionKey: query.collectionKey ?? null,
+    });
+
+    return { ok: true, items };
+  });
 
   app.post('/theses', async (request, reply) => {
     const payload = createThesisSchema.parse(request.body);
