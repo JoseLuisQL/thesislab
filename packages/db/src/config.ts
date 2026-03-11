@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -28,5 +29,28 @@ export function getDatabaseFilePath(databaseUrl = process.env.DATABASE_URL) {
 }
 
 export function getMigrationsDirectory() {
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../drizzle');
+  const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const candidateDirectories = [
+    path.resolve(moduleDirectory, '../drizzle'),
+    path.resolve(moduleDirectory, '../../drizzle'),
+  ];
+
+  for (const candidate of candidateDirectories) {
+    const journalPath = path.join(candidate, 'meta', '_journal.json');
+
+    if (pathExists(journalPath)) {
+      return candidate;
+    }
+  }
+
+  return candidateDirectories[0];
+}
+
+function pathExists(targetPath: string) {
+  try {
+    fs.statSync(targetPath);
+    return true;
+  } catch {
+    return false;
+  }
 }

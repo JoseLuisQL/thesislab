@@ -27,6 +27,7 @@ type MigrationJournalState = {
 
 type LegacyBootstrapPlan = {
   journalState: MigrationJournalState;
+  baseRepairMigrationSql: string | null;
   recordsToSeed: MigrationRecord[];
 };
 
@@ -192,6 +193,7 @@ async function planLegacyBootstrapFallback(
 
   return {
     journalState: migrationJournal,
+    baseRepairMigrationSql: await buildMissingBaseSchemaRepairSql(databaseFilePath, migrationRecords),
     recordsToSeed: failingRecord?.hash === baseRecord.hash
       ? migrationRecords
       : migrationRecords.filter((record) => {
@@ -209,85 +211,6 @@ async function seedDrizzleJournal(connection: ReturnType<typeof createDatabaseCo
     await connection.db.run(sql.raw(buildInsertJournalSql(record)));
   }
 }
-
-function isRecoverableLegacyMigrationError(error: unknown) {
-  return (
-    error instanceof Error
-    && (
-      /table [`"']?\w+[`"']? already exists/i.test(error.message)
-      || /duplicate column name/i.test(error.message)
-    )
-  );
-}
-
-function buildMigrationRecord(migrationFile: string, migrationsFolder: string, journalIdx: number): MigrationRecord {
-  const tag = path.basename(migrationFile, '.sql');
-  const content = fs.readFileSync(path.join(migrationsFolder, migrationFile), 'utf8');
-  const hash = createHash('sha256').update(content).digest('hex');
-  const createdAt = Number.parseInt(tag.split('_', 1)[0] ?? '0', 10);
-
-  return {
-    tag,
-    hash,
-    createdAt: Number.isNaN(createdAt) ? 0 : createdAt,
-    journalIdx,
-  };
-}
-
-function readMigrationJournalTags() {
-  const journal = JSON.parse(fs.readFileSync(DRIZZLE_JOURNAL_PATH, 'utf8')) as {
-    entries?: Array<{ tag?: string }>;
-  };
-
-  const tags = journal.entries
-    ?.map((entry) => entry.tag)
-    .filter((tag): tag is string => typeof tag === 'string' && tag.length > 0);
-
-  if (!tags || tags.length === 0) {
-    throw new Error(`No migration entries found in ${DRIZZLE_JOURNAL_PATH}`);
-  }
-
-  return tags;
-}
-
-function classifyBaseMigrationCoverage(existingTables: Set<string>, baseTag?: string) {
-  if (baseTag !== '0000_domain_core') {
-    return { isRecoverable: false, isComplete: false };
-  }
-
-  const expectedTables = [
-    'academic_qa_issues',
-    'academic_qa_runs',
-    'build_runs',
-    'checkpoints',
-    'claim_evidence_links',
-    'claims',
-    'compliance_issues',
-    'compliance_runs',
-    'evidence_fragments',
-    'feedback_entries',
-    'intake_jobs',
-    'normalized_nodes',
-    'policy_profiles',
-    'sources',
-    'theses',
-    'thesis_states',
-    'workflow_packs',
-    'workflow_steps',
-    'workflow_task_checkpoints',
-    'workflow_tasks',
-    'zotero_mappings',
-  ];
-
-  const hasCoreTables = ['theses', 'claims'].every((table) => existingTables.has(table));
-  const hasAllTables = expectedTables.every((table) => existingTables.has(table));
-
-  return {
-    isRecoverable: hasCoreTables,
-    isComplete: hasAllTables,
-  };
-}
-
 async function isRecoverableFollowupMigration(
   databaseFilePath: string,
   record: MigrationRecord,
@@ -371,6 +294,86 @@ async function listIndexes(databaseFilePath: string) {
   }
 }
 
+
+function isRecoverableLegacyMigrationError(error: unknown) {
+  return (
+    error instanceof Error
+    && (
+      /table [`"']?\w+[`"']? already exists/i.test(error.message)
+      || /duplicate column name/i.test(error.message)
+    )
+  );
+}
+
+function buildMigrationRecord(migrationFile: string, migrationsFolder: string, journalIdx: number): MigrationRecord {
+  const tag = path.basename(migrationFile, '.sql');
+  const content = fs.readFileSync(path.join(migrationsFolder, migrationFile), 'utf8');
+  const hash = createHash('sha256').update(content).digest('hex');
+  const createdAt = Number.parseInt(tag.split('_', 1)[0] ?? '0', 10);
+
+  return {
+    tag,
+    hash,
+    createdAt: Number.isNaN(createdAt) ? 0 : createdAt,
+    journalIdx,
+  };
+}
+
+function readMigrationJournalTags() {
+  const journal = JSON.parse(fs.readFileSync(DRIZZLE_JOURNAL_PATH, 'utf8')) as {
+    entries?: Array<{ tag?: string }>;
+  };
+
+  const tags = journal.entries
+    ?.map((entry) => entry.tag)
+    .filter((tag): tag is string => typeof tag === 'string' && tag.length > 0);
+
+  if (!tags || tags.length === 0) {
+    throw new Error(`No migration entries found in ${DRIZZLE_JOURNAL_PATH}`);
+  }
+
+  return tags;
+}
+
+function classifyBaseMigrationCoverage(existingTables: Set<string>, baseTag?: string) {
+  if (baseTag !== '0000_domain_core') {
+    return { isRecoverable: false, isComplete: false };
+  }
+
+  const expectedTables = [
+    'academic_qa_issues',
+    'academic_qa_runs',
+    'build_runs',
+    'checkpoints',
+    'claim_evidence_links',
+    'claims',
+    'compliance_issues',
+    'compliance_runs',
+    'evidence_fragments',
+    'feedback_entries',
+    'intake_jobs',
+    'normalized_nodes',
+    'policy_profiles',
+    'sources',
+    'theses',
+    'thesis_states',
+    'workflow_packs',
+    'workflow_steps',
+    'workflow_task_checkpoints',
+    'workflow_tasks',
+    'zotero_mappings',
+  ];
+
+  const hasCoreTables = ['theses', 'claims'].every((table) => existingTables.has(table));
+  const hasAllTables = expectedTables.every((table) => existingTables.has(table));
+
+  return {
+    isRecoverable: hasCoreTables,
+    isComplete: hasAllTables,
+  };
+}
+
+
 async function listExistingTables(databaseFilePath: string) {
   const connection = createDatabaseConnection(`file:${databaseFilePath}`);
 
@@ -423,7 +426,18 @@ async function repairLegacyBootstrap(databaseFilePath: string, plan: LegacyBoots
   try {
     await connection.sqlite.execute(DRIZZLE_MIGRATION_TABLE_SQL);
 
-    const missingRecords = plan.recordsToSeed.filter((record) => !plan.journalState.hashes.has(record.hash));
+    if (plan.baseRepairMigrationSql) {
+      await connection.sqlite.executeMultiple(plan.baseRepairMigrationSql);
+    }
+
+    const existingRows = await connection.sqlite.execute(
+      `select hash from ${DRIZZLE_JOURNAL_TABLE} order by created_at asc, id asc`,
+    );
+    const existingHashes = new Set(existingRows.rows.map((row) => String(row.hash)));
+
+    const missingRecords = plan.recordsToSeed.filter(
+      (record) => !plan.journalState.hashes.has(record.hash) && !existingHashes.has(record.hash),
+    );
 
     for (const record of missingRecords) {
       await connection.db.run(sql.raw(buildInsertJournalSql(record)));
@@ -431,6 +445,48 @@ async function repairLegacyBootstrap(databaseFilePath: string, plan: LegacyBoots
   } finally {
     connection.sqlite.close();
   }
+}
+
+async function buildMissingBaseSchemaRepairSql(databaseFilePath: string, migrationRecords: MigrationRecord[]) {
+  const [baseRecord] = migrationRecords;
+
+  if (!baseRecord || baseRecord.tag !== '0000_domain_core') {
+    return null;
+  }
+
+  const existingTables = await listExistingTables(databaseFilePath);
+  const migrationFile = migrationFilesByTag.get(baseRecord.tag);
+
+  if (!migrationFile) {
+    return null;
+  }
+
+  const migrationPath = path.join(getMigrationsDirectory(), migrationFile);
+  const migrationStatements = fs
+    .readFileSync(migrationPath, 'utf8')
+    .split('--> statement-breakpoint')
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
+
+  const missingStatements = migrationStatements.filter((statement) => {
+    if (statement.startsWith('CREATE TABLE `')) {
+      const tableName = statement.match(/CREATE TABLE `([^`]+)`/i)?.[1];
+      return Boolean(tableName) && !existingTables.has(tableName as string);
+    }
+
+    if (statement.startsWith('CREATE UNIQUE INDEX `') || statement.startsWith('CREATE INDEX `')) {
+      const tableName = statement.match(/ON `([^`]+)`/i)?.[1];
+      return Boolean(tableName) && existingTables.has(tableName as string);
+    }
+
+    return false;
+  });
+
+  if (missingStatements.length === 0) {
+    return null;
+  }
+
+  return `${missingStatements.join('\n--> statement-breakpoint\n')}\n`;
 }
 
 export async function inspectMigrationJournal(databaseUrl = process.env.DATABASE_URL) {

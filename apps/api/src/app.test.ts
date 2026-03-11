@@ -10,19 +10,6 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 import { createApp } from './app.js';
 import { createDatabaseConnection } from '@thesis-research-os/db';
 
-vi.mock('@thesis-research-os/db', async () => {
-  const actual = await vi.importActual<typeof import('@thesis-research-os/db')>('@thesis-research-os/db');
-
-  return {
-    ...actual,
-    runMigrations: vi.fn().mockResolvedValue({
-      filePath: '/tmp/test.sqlite',
-      migrationsFolder: '/tmp/migrations',
-      migrationFiles: [],
-    }),
-  };
-});
-
 describe('GET /health', () => {
   let app: ReturnType<typeof createApp>;
 
@@ -262,6 +249,17 @@ describe('GET /status/capabilities', () => {
 });
 
 describe('thesis lifecycle registry routes', () => {
+  let databaseUrl: string;
+
+  const createTestDatabaseUrl = () => {
+    const databasePath = path.join(
+      os.tmpdir(),
+      `thesis-api-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.sqlite`,
+    );
+
+    return `file:${databasePath}`;
+  };
+
   const createZipArchive = (entries: Record<string, string>) => {
     const localFileRecords: Buffer[] = [];
     const centralDirectoryRecords: Buffer[] = [];
@@ -380,6 +378,8 @@ describe('thesis lifecycle registry routes', () => {
 
   beforeEach(() => {
     vi.unstubAllEnvs();
+    databaseUrl = createTestDatabaseUrl();
+    vi.stubEnv('DATABASE_URL', databaseUrl);
     app = createApp();
   });
 
@@ -389,6 +389,12 @@ describe('thesis lifecycle registry routes', () => {
 
   afterEach(async () => {
     await app.close();
+
+    const databasePath = databaseUrl.startsWith('file:') ? databaseUrl.slice('file:'.length) : databaseUrl;
+
+    if (databasePath) {
+      fs.rmSync(databasePath, { force: true });
+    }
   });
 
   it('creates a thesis with durable identity and safe empty-state detail payload', async () => {
