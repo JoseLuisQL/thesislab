@@ -60,6 +60,50 @@ type IntakeReportSummary = {
     entrypoint: string | null;
     itemCount: number;
     items: string[];
+    selection: {
+      mode: 'deterministic' | 'ambiguous' | 'missing';
+      reason: string;
+      candidates: string[];
+    };
+    includeGraph: {
+      rootFile: string | null;
+      filesInOrder: string[];
+      edges: Array<{
+        from: string;
+        to: string;
+        command: 'input' | 'include';
+        line: number;
+      }>;
+      unresolved: Array<{
+        from: string;
+        target: string;
+        command: 'input' | 'include';
+        line: number;
+        reason: string;
+      }>;
+      blocked: Array<{
+        from: string;
+        target: string;
+        command: 'input' | 'include';
+        line: number;
+        resolvedPath: string;
+        reason: string;
+      }>;
+      cycles: Array<{
+        path: string[];
+      }>;
+    } | null;
+    outline: Array<{
+      id: string;
+      title: string | null;
+      level: number;
+      nodeType: string;
+      sourcePath: string | null;
+      anchor: {
+        start: string | null;
+        end: string | null;
+      };
+    }>;
   } | null;
   normalizationSummary: {
     nodeCount: number;
@@ -78,6 +122,8 @@ type IntakeReportSummary = {
 type IntakeExtractionStatus = IntakeReportSummary['extractionStatus'];
 type IntakeNormalizationStatus = IntakeReportSummary['normalizationStatus'];
 type InsertNormalizedNode = typeof normalizedNodes.$inferInsert;
+type StructureSummary = NonNullable<IntakeReportSummary['structureSummary']>;
+type StructureOutlineEntry = StructureSummary['outline'][number];
 
 const TERMINAL_INTAKE_STATUSES: IntakeStatus[] = ['succeeded', 'partial', 'failed'];
 
@@ -131,6 +177,7 @@ export type ActiveWorkspacePayload = {
   intakeJobId: string;
   detectedFormat: SourceFormat;
   entrypoint: string | null;
+  selectionMode: 'deterministic' | 'ambiguous' | 'missing' | null;
   nodeCount: number;
   rootNodeIds: string[];
   replacementOfIntakeJobId: string | null;
@@ -902,6 +949,7 @@ export class ThesisLifecycleService {
       intakeJobId: activeJob.id,
       detectedFormat: normalizeSourceFormat(activeJob.sourceFormat),
       entrypoint: activeJob.detectedEntrypoint,
+      selectionMode: report?.structureSummary?.selection.mode ?? null,
       nodeCount: report?.normalizationSummary?.nodeCount ?? 0,
       rootNodeIds: report?.normalizationSummary?.rootNodeIds ?? [],
       replacementOfIntakeJobId: report?.replacement?.replacesIntakeJobId ?? null,
@@ -1225,7 +1273,11 @@ function parseJsonObject(value: string): Record<string, unknown> | null {
 }
 
 function canonicalizeInsideBoundary(workspacePath: string, importRootPath: string, thesisId: string) {
-  const translatedImportRootPath = translateHostPathToMountedRoot(path.resolve(importRootPath)) ?? importRootPath;
+  const inputWasAbsolute = path.isAbsolute(importRootPath);
+  const normalizedImportRootPath = inputWasAbsolute ? path.resolve(importRootPath) : importRootPath;
+  const translatedImportRootPath = inputWasAbsolute
+    ? (translateHostPathToMountedRoot(normalizedImportRootPath) ?? normalizedImportRootPath)
+    : normalizedImportRootPath;
   const boundaryRoot = resolveBoundaryRoot(workspacePath, translatedImportRootPath);
   const requestedAbsolute = resolveImportRootPath(boundaryRoot, translatedImportRootPath);
   const resolved = resolveExistingPath(requestedAbsolute);
@@ -1239,20 +1291,20 @@ function canonicalizeInsideBoundary(workspacePath: string, importRootPath: strin
 }
 
 function resolveBoundaryRoot(workspacePath: string, importRootPath: string) {
-  const workspaceCandidates = [workspacePath];
-
-  if (path.isAbsolute(workspacePath)) {
-    workspaceCandidates.push(mapWorkspacePathToMountedRoot(workspacePath));
+  if (!path.isAbsolute(importRootPath)) {
+    return resolveRelativeBoundaryRoot(workspacePath, importRootPath) ?? resolveExistingPath(workspacePath);
   }
 
-  for (const candidate of workspaceCandidates) {
-    try {
-      return resolveExistingPath(candidate);
-    } catch (error) {
-      if (!isMissingPathError(error)) {
-        throw error;
-      }
-    }
+  const resolvedImportBoundaryRoot = resolveExistingImportBoundaryRoot(importRootPath);
+  const workspaceCandidates = collectWorkspaceBoundaryCandidates(workspacePath, importRootPath);
+  const resolvedWorkspaceBoundary = resolveExistingWorkspaceBoundaryCandidate(workspaceCandidates);
+
+  if (resolvedWorkspaceBoundary) {
+    return resolvedWorkspaceBoundary;
+  }
+
+  if (resolvedImportBoundaryRoot) {
+    return resolvedImportBoundaryRoot;
   }
 
   if (path.isAbsolute(importRootPath)) {
@@ -1266,12 +1318,133 @@ function resolveBoundaryRoot(workspacePath: string, importRootPath: string) {
     }
   }
 
+  const fallbackWorkspaceBoundary = resolveWorkspaceBoundaryFromImportRoot(workspacePath, importRootPath);
+  if (fallbackWorkspaceBoundary) {
+    return fallbackWorkspaceBoundary;
+  }
+
   return resolveExistingPath(workspacePath);
+}
+
+function resolveWorkspaceBoundaryFromImportRoot(workspacePath: string, importRootPath: string) {
+  if (!path.isAbsolute(workspacePath) || !path.isAbsolute(importRootPath)) {
+    return null;
+  }
+
+  const normalizedWorkspacePath = path.resolve(workspacePath);
+  const normalizedImportRootPath = path.resolve(importRootPath);
+  const workspaceSegments = splitPathSegments(normalizedWorkspacePath);
+  const importSegments = splitPathSegments(normalizedImportRootPath);
+  const maxSharedSegments = Math.min(workspaceSegments.length, importSegments.length);
+
+  for (let sharedCount = maxSharedSegments; sharedCount >= 1; sharedCount -= 1) {
+    const workspacePrefix = workspaceSegments.slice(0, sharedCount);
+    const importPrefix = importSegments.slice(0, sharedCount);
+
+    if (workspacePrefix.join(path.sep) !== importPrefix.join(path.sep)) {
+      continue;
+    }
+
+    const candidateRoot = path.join(path.sep, ...workspacePrefix);
+
+    if (!fs.existsSync(candidateRoot)) {
+      continue;
+    }
+
+    try {
+      return resolveExistingPath(candidateRoot);
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  return null;
+}
+
+function resolveExistingWorkspaceBoundaryCandidate(candidates: string[]) {
+  for (const candidate of candidates) {
+    try {
+      return resolveExistingPath(candidate);
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  return null;
+}
+
+function resolveExistingImportBoundaryRoot(importRootPath: string) {
+  try {
+    const resolvedImportRoot = resolveExistingPath(importRootPath);
+    const stats = fs.statSync(resolvedImportRoot);
+    return stats.isDirectory() ? resolvedImportRoot : path.dirname(resolvedImportRoot);
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+function resolveRelativeBoundaryRoot(workspacePath: string, importRootPath: string) {
+  const directPath = path.resolve(importRootPath);
+
+  if (fs.existsSync(directPath)) {
+    return path.dirname(resolveExistingPath(directPath));
+  }
+
+  const relativeWorkspaceCandidates = uniquePaths([
+    workspacePath,
+    path.resolve(workspacePath),
+    mapWorkspacePathToMountedRoot(workspacePath),
+  ]);
+
+  for (const candidate of relativeWorkspaceCandidates) {
+    const resolvedCandidate = path.resolve(candidate, importRootPath);
+
+    if (!fs.existsSync(resolvedCandidate)) {
+      continue;
+    }
+
+    try {
+      return resolveExistingPath(candidate);
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  return null;
+}
+
+function collectWorkspaceBoundaryCandidates(workspacePath: string, importRootPath: string) {
+  const candidates = [workspacePath];
+
+  if (path.isAbsolute(workspacePath)) {
+    candidates.push(mapWorkspacePathToMountedRoot(workspacePath));
+  }
+
+  if (path.isAbsolute(importRootPath)) {
+    candidates.push(importRootPath);
+
+    const translatedImportRootPath = translateHostPathToMountedRoot(importRootPath);
+    if (translatedImportRootPath) {
+      candidates.push(translatedImportRootPath);
+    }
+  }
+
+  return uniquePaths(candidates);
 }
 
 function mapWorkspacePathToMountedRoot(workspacePath: string) {
   const cwd = path.resolve(process.cwd());
-  const mountedRoot = fs.realpathSync.native(cwd);
+  const mountedRoot = fs.existsSync(cwd) ? fs.realpathSync.native(cwd) : cwd;
   const mountedRootSegments = splitPathSegments(mountedRoot);
   const workspaceSegments = splitPathSegments(path.resolve(workspacePath));
   const workspaceMatch = findRepoNameMatch(workspaceSegments, mountedRootSegments.at(-1));
@@ -1347,7 +1520,27 @@ function findCommonSuffixMatch(workspaceSegments: string[], mountedRootSegments:
 function resolveImportRootPath(boundaryRoot: string, importRootPath: string) {
   return path.isAbsolute(importRootPath)
     ? resolveAbsoluteImportRootPath(importRootPath)
-    : path.resolve(boundaryRoot, importRootPath);
+    : resolveRelativeImportRootPath(boundaryRoot, importRootPath);
+}
+
+function resolveRelativeImportRootPath(boundaryRoot: string, importRootPath: string) {
+  const directPath = path.resolve(importRootPath);
+
+  if (fs.existsSync(directPath)) {
+    return directPath;
+  }
+
+  const translatedHostPath = translateHostPathToMountedRoot(directPath);
+  if (translatedHostPath && fs.existsSync(translatedHostPath)) {
+    return translatedHostPath;
+  }
+
+  const mappedPath = mapWorkspacePathToMountedRoot(directPath);
+  if (fs.existsSync(mappedPath)) {
+    return mappedPath;
+  }
+
+  return path.resolve(boundaryRoot, importRootPath);
 }
 
 function resolveAbsoluteImportRootPath(importRootPath: string) {
@@ -1383,6 +1576,10 @@ function translateHostPathToMountedRoot(targetPath: string) {
   }
 
   return null;
+}
+
+function uniquePaths(targetPaths: string[]) {
+  return Array.from(new Set(targetPaths.map((targetPath) => path.resolve(targetPath))));
 }
 
 function resolveExistingPath(targetPath: string) {
@@ -1646,20 +1843,33 @@ function inspectLatexImport(importRootPath: string) {
     ? collectTexFiles(importRootPath)
     : [path.basename(importRootPath)];
   const rootDir = stats.isDirectory() ? importRootPath : path.dirname(importRootPath);
-  const entrypoint = texFiles.find((entry) => entry.toLowerCase() === 'main.tex') ?? texFiles[0] ?? null;
+  const rootSelection = selectLatexRoot(rootDir, texFiles);
+  const entrypoint = rootSelection.entrypoint;
   let detectedEntrypoint = entrypoint;
   let structureSummary: IntakeReportSummary['structureSummary'] = entrypoint
     ? {
         entrypoint,
         itemCount: texFiles.length,
         items: texFiles,
+        selection: rootSelection.selection,
+        includeGraph: null,
+        outline: [],
       }
-    : null;
+    : {
+        entrypoint: null,
+        itemCount: texFiles.length,
+        items: texFiles,
+        selection: rootSelection.selection,
+        includeGraph: null,
+        outline: [],
+      };
 
   if (!entrypoint) {
     failures.push({
       code: 'LATEX_ENTRYPOINT_NOT_FOUND',
-      message: 'No .tex entrypoint was found inside the provided LaTeX import boundary.',
+      message: rootSelection.selection.mode === 'ambiguous'
+        ? 'No deterministic LaTeX entrypoint could be chosen because multiple root candidates remain.'
+        : 'No .tex entrypoint was found inside the provided LaTeX import boundary.',
       detail: importRootPath,
     });
   } else {
@@ -1682,6 +1892,9 @@ function inspectLatexImport(importRootPath: string) {
           entrypoint: graph.entrypoint,
           itemCount: graph.orderedFiles.length,
           items: graph.orderedFiles,
+          selection: rootSelection.selection,
+          includeGraph: graph.includeGraph,
+          outline: graph.outline,
         };
       }
     }
@@ -1734,6 +1947,23 @@ function inspectDocxImport(importRootPath: string) {
       entrypoint: 'word/document.xml',
       itemCount: outline.items.length,
       items: outline.items,
+      selection: {
+        mode: 'deterministic',
+        reason: 'DOCX imports use word/document.xml as the canonical structural entrypoint.',
+        candidates: ['word/document.xml'],
+      },
+      includeGraph: null,
+      outline: outline.nodes.slice(1).map((node) => ({
+        id: node.id,
+        title: node.title ?? null,
+        level: node.nodeType === 'chapter' ? 1 : node.nodeType === 'section' ? 2 : 3,
+        nodeType: node.nodeType,
+        sourcePath: node.sourcePath ?? null,
+        anchor: {
+          start: node.sourceStart ?? null,
+          end: node.sourceEnd ?? null,
+        },
+      })),
     };
   }
 
@@ -1772,6 +2002,23 @@ function inspectPdfImport(importRootPath: string) {
           entrypoint: path.basename(importRootPath),
           itemCount: normalizedNodeSeed.length,
           items: normalizedNodeSeed.map((node) => `${node.nodeType}:${node.title ?? 'untitled'}`),
+          selection: {
+            mode: 'deterministic' as const,
+            reason: 'PDF imports use the file itself as the canonical structural entrypoint.',
+            candidates: [path.basename(importRootPath)],
+          },
+          includeGraph: null,
+          outline: normalizedNodeSeed.slice(1).map((node) => ({
+            id: node.id,
+            title: node.title ?? null,
+            level: node.nodeType === 'chapter' ? 1 : node.nodeType === 'section' ? 2 : 3,
+            nodeType: node.nodeType,
+            sourcePath: node.sourcePath ?? null,
+            anchor: {
+              start: node.sourceStart ?? null,
+              end: node.sourceEnd ?? null,
+            },
+          })),
         }
       : null,
     warnings,
@@ -1784,9 +2031,15 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
   const warnings: string[] = [];
   const failures: IntakeFailureDiagnostic[] = [];
   const visited = new Set<string>();
+  const visitStack: string[] = [];
   const orderedFiles: string[] = [];
   const nodes: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>> = [];
   const existingIds = new Set<string>();
+  const outline: StructureOutlineEntry[] = [];
+  const includeEdges: NonNullable<StructureSummary['includeGraph']>['edges'] = [];
+  const unresolvedIncludes: NonNullable<StructureSummary['includeGraph']>['unresolved'] = [];
+  const blockedIncludes: NonNullable<StructureSummary['includeGraph']>['blocked'] = [];
+  const cycles: NonNullable<StructureSummary['includeGraph']>['cycles'] = [];
   const rootId = stableNodeId('latex', path.relative(rootDir, entrypoint), 'document', 0, 'document');
 
   const rootContent = fs.readFileSync(entrypoint, 'utf8');
@@ -1810,10 +2063,16 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
 
   const visitFile = (absolutePath: string) => {
     const relativePath = path.relative(rootDir, absolutePath);
+    if (visitStack.includes(relativePath)) {
+      cycles.push({ path: [...visitStack, relativePath] });
+      warnings.push(`Cycle-safe traversal skipped recursive include back into ${relativePath}.`);
+      return;
+    }
     if (visited.has(relativePath)) {
       return;
     }
     visited.add(relativePath);
+    visitStack.push(relativePath);
     orderedFiles.push(relativePath);
 
     const content = fs.readFileSync(absolutePath, 'utf8');
@@ -1844,6 +2103,17 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         });
+        outline.push({
+          id,
+          title: title.trim(),
+          level,
+          nodeType: kind,
+          sourcePath: relativePath,
+          anchor: {
+            start: String(lineNumber),
+            end: String(lineNumber),
+          },
+        });
         existingIds.add(id);
         sectionStack.push({ level, id });
       }
@@ -1851,12 +2121,21 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
       const includeMatch = line.match(/\\(?:input|include)\{([^}]*)\}/);
       if (includeMatch) {
         const rawTarget = includeMatch[1]!.trim();
+        const command = line.includes('\\include{') ? 'include' : 'input';
         const candidate = rawTarget.endsWith('.tex') ? rawTarget : `${rawTarget}.tex`;
         const resolvedCandidate = path.resolve(path.dirname(absolutePath), candidate);
         const resolvedPath = fs.existsSync(resolvedCandidate) ? fs.realpathSync(resolvedCandidate) : resolvedCandidate;
         const relative = path.relative(rootDir, resolvedPath);
 
         if (relative.startsWith('..') || path.isAbsolute(relative)) {
+          blockedIncludes.push({
+            from: relativePath,
+            target: rawTarget,
+            command,
+            line: lineNumber,
+            resolvedPath,
+            reason: 'resolved_outside_workspace',
+          });
           failures.push({
             code: 'LATEX_INCLUDE_OUTSIDE_BOUNDARY',
             message: 'A LaTeX include resolved outside the declared import boundary.',
@@ -1866,18 +2145,125 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
         }
 
         if (!fs.existsSync(resolvedPath)) {
+          unresolvedIncludes.push({
+            from: relativePath,
+            target: rawTarget,
+            command,
+            line: lineNumber,
+            reason: 'missing_target',
+          });
           warnings.push(`Unresolved LaTeX include ${candidate} from ${relativePath}:${lineNumber}.`);
           return;
         }
 
+        includeEdges.push({
+          from: relativePath,
+          to: relative,
+          command,
+          line: lineNumber,
+        });
         visitFile(fs.realpathSync(resolvedPath));
       }
     });
+
+    visitStack.pop();
   };
 
   visitFile(fs.realpathSync(entrypoint));
 
-  return { nodes, warnings, failures, orderedFiles, entrypoint: path.relative(rootDir, entrypoint) };
+  return {
+    nodes,
+    warnings,
+    failures,
+    orderedFiles,
+    entrypoint: path.relative(rootDir, entrypoint),
+    includeGraph: {
+      rootFile: path.relative(rootDir, entrypoint),
+      filesInOrder: orderedFiles,
+      edges: includeEdges,
+      unresolved: unresolvedIncludes,
+      blocked: blockedIncludes,
+      cycles,
+    },
+    outline,
+  };
+}
+
+function selectLatexRoot(rootDir: string, texFiles: string[]) {
+  const sortedCandidates = texFiles.slice().sort((left, right) => left.localeCompare(right));
+
+  if (sortedCandidates.length === 0) {
+    return {
+      entrypoint: null,
+      selection: {
+        mode: 'missing' as const,
+        reason: 'No .tex files were found within the declared workspace boundary.',
+        candidates: [],
+      },
+    };
+  }
+
+  const candidates = sortedCandidates.filter((candidate) => isLatexRootCandidate(path.join(rootDir, candidate)));
+
+  if (candidates.length === 1) {
+    return {
+      entrypoint: candidates[0] ?? null,
+      selection: {
+        mode: 'deterministic' as const,
+        reason: 'A single root candidate containing a document preamble was found.',
+        candidates,
+      },
+    };
+  }
+
+  const mainCandidate = candidates.find((candidate) => path.basename(candidate).toLowerCase() === 'main.tex');
+  if (mainCandidate) {
+    return {
+      entrypoint: mainCandidate,
+      selection: {
+        mode: 'deterministic' as const,
+        reason: 'Selected main.tex as the canonical root among multiple root candidates.',
+        candidates,
+      },
+    };
+  }
+
+  if (candidates.length > 1) {
+    return {
+      entrypoint: null,
+      selection: {
+        mode: 'ambiguous' as const,
+        reason: 'Multiple root candidates contain document preambles and no canonical main.tex is present.',
+        candidates,
+      },
+    };
+  }
+
+  const fallbackMain = sortedCandidates.find((candidate) => path.basename(candidate).toLowerCase() === 'main.tex') ?? null;
+  if (fallbackMain) {
+    return {
+      entrypoint: fallbackMain,
+      selection: {
+        mode: 'deterministic' as const,
+        reason: 'Selected main.tex as fallback canonical root because no explicit document preamble candidates were detected elsewhere.',
+        candidates: [fallbackMain],
+      },
+    };
+  }
+
+  return {
+    entrypoint: null,
+    selection: {
+      mode: 'missing' as const,
+      reason: 'No canonical LaTeX root with a document preamble could be identified.',
+      candidates: sortedCandidates,
+    },
+  };
+}
+
+function isLatexRootCandidate(filePath: string) {
+  const content = fs.readFileSync(filePath, 'utf8');
+  return /\\documentclass|\\begin\{document\}/.test(content);
 }
 
 function extractDocxDocumentXml(buffer: Buffer) {

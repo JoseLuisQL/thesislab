@@ -1917,6 +1917,77 @@ describe('thesis lifecycle registry routes', () => {
     });
   });
 
+  it('preserves the nearest real workspace boundary when the stored workspace path is missing but the import root is nested inside it', async () => {
+    const realWorkspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'latex-missing-workspace-boundary-'));
+    const latexDir = path.join(realWorkspaceRoot, 'projects', 'latex-project');
+    const missingWorkspacePath = path.join(realWorkspaceRoot, 'missing', 'workspace-root');
+    fs.mkdirSync(latexDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'main.tex'),
+      '\\documentclass{report}\n\\begin{document}\n\\chapter{Boundary fallback}\n\\section{Nested import}\n\\end{document}\n',
+      'utf8',
+    );
+    const escapedFile = path.join(realWorkspaceRoot, 'projects', 'outside.tex');
+    fs.writeFileSync(escapedFile, '\\section{Outside boundary}\n', 'utf8');
+    fs.writeFileSync(
+      path.join(latexDir, 'escaped.tex'),
+      `\\documentclass{report}\n\\begin{document}\n\\input{${path.relative(latexDir, escapedFile).replace(/\\/g, '/').replace(/\.tex$/, '')}}\n\\end{document}\n`,
+      'utf8',
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis boundary fallback',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: missingWorkspacePath,
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const allowedResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+    const blockedResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: path.join(realWorkspaceRoot, 'projects', 'latex-project', 'escaped.tex') },
+    });
+
+    expect(allowedResponse.statusCode).toBe(201);
+    expect(blockedResponse.statusCode).toBe(201);
+
+    const allowedPayload = allowedResponse.json() as {
+      intakeJob: {
+        status: string;
+        importRootPath: string;
+        report: {
+          terminalStatus: string;
+          failures: Array<{ code: string }>;
+        } | null;
+      };
+    };
+
+    expect(allowedPayload.intakeJob.status).toBe('succeeded');
+    expect(allowedPayload.intakeJob.importRootPath).toBe(latexDir);
+    expect(allowedPayload.intakeJob.report).toMatchObject({
+      terminalStatus: 'succeeded',
+      failures: [],
+    });
+    expect((blockedResponse.json() as { intakeJob: { status: string; report: { failures: Array<{ code: string }> } } }).intakeJob).toMatchObject({
+      status: 'failed',
+      report: {
+        failures: [expect.objectContaining({ code: 'LATEX_INCLUDE_OUTSIDE_BOUNDARY' })],
+      },
+    });
+  });
+
   it('blocks LaTeX intake that escapes the thesis workspace boundary through include roots or symlinks', async () => {
     const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-boundary-'));
     const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-external-'));
