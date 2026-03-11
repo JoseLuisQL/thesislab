@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { z } from 'zod';
 
 import { buildHealthPayload } from '@thesis-research-os/shared';
-import { runMigrations } from '@thesis-research-os/db/migrator';
+import { getDatabaseFilePath, runMigrations } from '@thesis-research-os/db';
 
 import { buildLocalFirstStatusPayload } from './status.js';
 import {
@@ -132,8 +132,28 @@ const latexBuildSchema = z.object({
   createdBy: z.string().trim().min(1),
 });
 
-function resolveRuntimeDatabaseUrl() {
-  return process.env.DATABASE_URL?.trim() || 'file:./data/thesis-research-os.sqlite';
+export function resolveRuntimeDatabaseUrl() {
+  const configuredDatabaseUrl = process.env.DATABASE_URL?.trim();
+
+  if (configuredDatabaseUrl) {
+    return configuredDatabaseUrl;
+  }
+
+  const runtimeRelativeDefault = path.resolve(process.cwd(), 'data', 'thesis-research-os.sqlite');
+  const packageDefault = getDatabaseFilePath();
+
+  if (runtimeRelativeDefault === packageDefault) {
+    return `file:${runtimeRelativeDefault}`;
+  }
+
+  const hostRepoRoot = process.env.HOST_REPO_ROOT?.trim();
+  const hostRepoDataPath = hostRepoRoot ? path.resolve(hostRepoRoot, 'data', 'thesis-research-os.sqlite') : null;
+
+  if (hostRepoDataPath && runtimeRelativeDefault === hostRepoDataPath) {
+    return `file:${packageDefault}`;
+  }
+
+  return 'file:./data/thesis-research-os.sqlite';
 }
 
 export function createApp() {
