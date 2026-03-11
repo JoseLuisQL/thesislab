@@ -97,6 +97,7 @@ CREATE TABLE `checkpoints` (
 	`scope` text NOT NULL,
 	`reason` text NOT NULL,
 	`snapshot_path` text,
+	`snapshot_metadata_json` text,
 	`created_by` text NOT NULL,
 	`checkpointed_at` text NOT NULL,
 	`created_at` text DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW')) NOT NULL,

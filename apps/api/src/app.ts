@@ -13,8 +13,12 @@ import {
   type CreateIntakeJobInput,
   IntakeBoundaryViolationError,
   IntakeJobNotFoundError,
+  LatexCheckpointRestoreError,
+  LatexEditConflictError,
+  LatexWorkspaceNotReadyError,
   ThesisNotFoundError,
   createThesisLifecycleService,
+  type LatexEditRequest,
   type TransitionThesisInput,
 } from './thesis.js';
 
@@ -58,6 +62,20 @@ const createFeedbackSchema = z.object({
 
 const createIntakeJobSchema = z.object({
   importRootPath: z.string().trim().min(1),
+});
+
+const latexEditSchema = z.object({
+  target: z.object({
+    normalizedNodeId: z.string().trim().min(1).optional(),
+    sourcePath: z.string().trim().min(1),
+    title: z.string().trim().min(1),
+    nodeType: z.enum(['chapter', 'section', 'subsection']),
+    anchorStart: z.string().trim().min(1),
+    anchorEnd: z.string().trim().min(1).nullable().optional(),
+  }),
+  replacement: z.string(),
+  note: z.string().trim().min(1).nullable().optional(),
+  createdBy: z.string().trim().min(1),
 });
 
 export function createApp() {
@@ -109,6 +127,36 @@ export function createApp() {
         thesisId: error.thesisId,
         importRootPath: error.importRootPath,
         resolvedPath: error.resolvedPath,
+      });
+    }
+
+    if (error instanceof LatexWorkspaceNotReadyError) {
+      return reply.status(409).send({
+        ok: false,
+        code: 'LATEX_WORKSPACE_NOT_READY',
+        message: error.message,
+        thesisId: error.thesisId,
+      });
+    }
+
+    if (error instanceof LatexEditConflictError) {
+      return reply.status(409).send({
+        ok: false,
+        code: 'LATEX_EDIT_TARGET_CONFLICT',
+        message: error.message,
+        thesisId: error.thesisId,
+        reasons: error.reasons,
+        structure: error.snapshot,
+      });
+    }
+
+    if (error instanceof LatexCheckpointRestoreError) {
+      return reply.status(400).send({
+        ok: false,
+        code: 'LATEX_CHECKPOINT_RESTORE_ERROR',
+        message: error.message,
+        thesisId: error.thesisId,
+        checkpointId: error.checkpointId,
       });
     }
 
@@ -256,6 +304,25 @@ export function createApp() {
     const nodes = await (await getThesisLifecycle()).service.listNormalizedNodes(params.thesisId, params.intakeJobId);
 
     return { ok: true, nodes };
+  });
+
+  app.post('/theses/:thesisId/latex/edits', async (request, reply) => {
+    const payload = latexEditSchema.parse(request.body) as LatexEditRequest;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const result = await (await getThesisLifecycle()).service.editLatexSection(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, edit: result });
+  });
+
+  app.post('/theses/:thesisId/latex/checkpoints/:checkpointId/restore', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; checkpointId: string };
+    const restore = await (await getThesisLifecycle()).service.restoreLatexCheckpoint(params.thesisId, params.checkpointId);
+
+    return { ok: true, restore };
   });
 
   return app;

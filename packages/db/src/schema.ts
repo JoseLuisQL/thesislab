@@ -101,6 +101,7 @@ export const checkpoints = sqliteTable('checkpoints', {
   scope: text('scope').notNull(),
   reason: text('reason').notNull(),
   snapshotPath: text('snapshot_path'),
+  snapshotMetadataJson: text('snapshot_metadata_json'),
   createdBy: text('created_by').notNull(),
   checkpointedAt: text('checkpointed_at').notNull(),
   ...timestampColumns,

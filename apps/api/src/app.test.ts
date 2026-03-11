@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import zlib from 'node:zlib';
 
@@ -1643,6 +1644,209 @@ describe('thesis lifecycle registry routes', () => {
     expect((nodesRepeatResponse.json() as { nodes: Array<{ id: string }> }).nodes.map((node) => node.id)).toEqual(
       nodesPayload.nodes.map((node) => node.id),
     );
+  });
+
+  it('edits only the requested LaTeX section, creates a checkpoint first, rejects stale targets safely, and restores snapshots byte-for-byte', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'latex-edit-restore-'));
+    const latexDir = path.join(fixtureRoot, 'latex-project');
+    fs.mkdirSync(path.join(latexDir, 'sections'), { recursive: true });
+    const mainTex = path.join(latexDir, 'main.tex');
+    const introTex = path.join(latexDir, 'sections', 'intro.tex');
+
+    fs.writeFileSync(
+      mainTex,
+      String.raw`\documentclass{report}
+\begin{document}
+\chapter{Main Chapter}
+\input{sections/intro}
+\section{Evaluation}
+Original evaluation body.
+\end{document}
+`,
+      'utf8',
+    );
+    fs.writeFileSync(
+      introTex,
+      String.raw`\section{Introduction}
+Original intro body.
+\subsection{Context}
+Original context body.
+`,
+      'utf8',
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis latex editable',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+    const intakePayload = intakeResponse.json() as {
+      intakeJob: {
+        id: string;
+        report: {
+          structureSummary: {
+            outline: Array<{
+              id: string;
+              title: string | null;
+              nodeType: string;
+              sourcePath: string | null;
+              anchor: { start: string | null; end: string | null };
+            }>;
+          } | null;
+        } | null;
+      };
+    };
+
+    const introSection = intakePayload.intakeJob.report?.structureSummary?.outline.find((node) => node.title === 'Introduction');
+    expect(introSection).toBeTruthy();
+
+    const introBeforeHash = createHash('sha256').update(fs.readFileSync(introTex, 'utf8')).digest('hex');
+    const mainBeforeHash = createHash('sha256').update(fs.readFileSync(mainTex, 'utf8')).digest('hex');
+
+    const editResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/latex/edits`,
+      payload: {
+        target: {
+          normalizedNodeId: introSection?.id,
+          sourcePath: introSection?.sourcePath,
+          title: introSection?.title,
+          nodeType: introSection?.nodeType,
+          anchorStart: introSection?.anchor.start,
+          anchorEnd: introSection?.anchor.end,
+        },
+        replacement: String.raw`\section{Introduction}
+Updated intro body.
+`,
+        createdBy: 'user:test',
+      },
+    });
+
+    expect(editResponse.statusCode).toBe(201);
+    const editPayload = editResponse.json() as {
+      edit: {
+        checkpoint: { id: string; reason: string; snapshotPath: string | null };
+        changedFiles: Array<{
+          path: string;
+          changedRange: { startLine: number; endLine: number };
+          unchangedContext: { before: boolean; after: boolean };
+          sha256Before: string;
+          sha256After: string;
+        }>;
+        structure: { outline: Array<{ title: string | null; anchor: { start: string | null; end: string | null } }> };
+      };
+    };
+
+    expect(editPayload.edit.checkpoint.reason).toBe('before-latex-edit');
+    expect(editPayload.edit.checkpoint.snapshotPath).toEqual(expect.any(String));
+    expect(editPayload.edit.changedFiles).toEqual([
+      expect.objectContaining({
+        path: 'sections/intro.tex',
+        changedRange: { startLine: 1, endLine: 3 },
+        unchangedContext: { before: true, after: true },
+        sha256Before: introBeforeHash,
+      }),
+    ]);
+
+    const introAfterEdit = fs.readFileSync(introTex, 'utf8');
+    const mainAfterEditHash = createHash('sha256').update(fs.readFileSync(mainTex, 'utf8')).digest('hex');
+    expect(introAfterEdit).toContain('Updated intro body.');
+    expect(introAfterEdit).toContain('Original context body.');
+    expect(mainAfterEditHash).toBe(mainBeforeHash);
+
+    const refreshedJobResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/intake-jobs/${intakePayload.intakeJob.id}`,
+    });
+    expect(refreshedJobResponse.statusCode).toBe(200);
+    const refreshedJob = refreshedJobResponse.json() as {
+      intakeJob: {
+        report: {
+          structureSummary: {
+            outline: Array<{
+              id: string;
+              title: string | null;
+              nodeType: string;
+              sourcePath: string | null;
+              anchor: { start: string | null; end: string | null };
+            }>;
+          } | null;
+        } | null;
+      };
+    };
+    const refreshedIntroSection = refreshedJob.intakeJob.report?.structureSummary?.outline.find((node) => node.title === 'Introduction');
+    expect(refreshedIntroSection).toBeTruthy();
+
+    const staleEditResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/latex/edits`,
+      payload: {
+        target: {
+          normalizedNodeId: refreshedIntroSection?.id,
+          sourcePath: refreshedIntroSection?.sourcePath,
+          title: refreshedIntroSection?.title,
+          nodeType: refreshedIntroSection?.nodeType,
+          anchorStart: '999',
+          anchorEnd: refreshedIntroSection?.anchor.end,
+        },
+        replacement: String.raw`\section{Introduction}
+This stale edit must fail.
+`,
+        createdBy: 'user:test',
+      },
+    });
+
+    expect(staleEditResponse.statusCode).toBe(409);
+    const stalePayload = staleEditResponse.json() as {
+      code: string;
+      reasons: string[];
+      structure: { outline: Array<{ title: string | null; anchor: { start: string | null; end: string | null } }> };
+    };
+    expect(stalePayload.code).toBe('LATEX_EDIT_TARGET_CONFLICT');
+    expect(stalePayload.reasons).toContain('The requested LaTeX edit target anchors are stale for the current structure.');
+    expect(createHash('sha256').update(fs.readFileSync(introTex, 'utf8')).digest('hex')).toBe(
+      createHash('sha256').update(introAfterEdit).digest('hex'),
+    );
+    expect(createHash('sha256').update(fs.readFileSync(mainTex, 'utf8')).digest('hex')).toBe(mainBeforeHash);
+
+    const restoreResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/latex/checkpoints/${editPayload.edit.checkpoint.id}/restore`,
+    });
+
+    expect(restoreResponse.statusCode).toBe(200);
+    const restorePayload = restoreResponse.json() as {
+      restore: {
+        restoredFiles: Array<{ path: string; sha256Before: string; sha256After: string }>;
+      };
+    };
+    expect(restorePayload.restore.restoredFiles).toEqual([
+      expect.objectContaining({
+        path: 'sections/intro.tex',
+        sha256Before: editPayload.edit.changedFiles[0]?.sha256After,
+        sha256After: introBeforeHash,
+      }),
+    ]);
+    expect(fs.readFileSync(introTex, 'utf8')).toBe(String.raw`\section{Introduction}
+Original intro body.
+\subsection{Context}
+Original context body.
+`);
+    expect(createHash('sha256').update(fs.readFileSync(mainTex, 'utf8')).digest('hex')).toBe(mainBeforeHash);
   });
 
   it('extracts degraded DOCX and PDF outlines with explicit provenance-unavailable warnings when semantics are weak', async () => {

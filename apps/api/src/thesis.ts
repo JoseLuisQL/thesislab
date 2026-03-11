@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import zlib from 'node:zlib';
 
 import { asc, desc, eq } from 'drizzle-orm';
@@ -119,6 +119,114 @@ type IntakeReportSummary = {
   recommendedNextSteps: IntakeReportRecommendation[];
 };
 
+type LatexStructureSelection = NonNullable<IntakeReportSummary['structureSummary']>['selection'];
+
+type LatexStructureGraph = NonNullable<NonNullable<IntakeReportSummary['structureSummary']>['includeGraph']>;
+
+type BaseLatexStructureNode = {
+  id: string;
+  title: string | null;
+  level: number;
+  nodeType: string;
+  sourcePath: string | null;
+  anchor: {
+    start: string | null;
+    end: string | null;
+  };
+};
+
+type LatexStructureNode = BaseLatexStructureNode & {
+  normalizedNodeId: string;
+};
+
+type LatexStructureSnapshot = {
+  entrypoint: string | null;
+  selection: LatexStructureSelection;
+  includeGraph: LatexStructureGraph | null;
+  outline: LatexStructureNode[];
+};
+
+type LatexEditTarget = {
+  normalizedNodeId?: string;
+  sourcePath: string;
+  title: string;
+  nodeType: 'chapter' | 'section' | 'subsection';
+  anchorStart: string;
+  anchorEnd?: string | null;
+};
+
+export type LatexEditRequest = {
+  target: LatexEditTarget;
+  replacement: string;
+  note?: string | null;
+  createdBy: string;
+};
+
+type LatexCheckpointFileSnapshot = {
+  relativePath: string;
+  content: string;
+  sha256: string;
+};
+
+type LatexCheckpointSnapshot = {
+  kind: 'latex-edit';
+  version: 1;
+  thesisId: string;
+  workspacePath: string;
+  intakeJobId: string;
+  checkpointId: string;
+  createdAt: string;
+  target: {
+    normalizedNodeId: string;
+    sourcePath: string;
+    title: string;
+    nodeType: 'chapter' | 'section' | 'subsection';
+    startLine: number;
+    endLine: number;
+  };
+  files: LatexCheckpointFileSnapshot[];
+};
+
+type LatexEditPayload = {
+  thesisId: string;
+  intakeJobId: string;
+  checkpoint: ThesisCheckpointPayload;
+  target: {
+    normalizedNodeId: string;
+    sourcePath: string;
+    title: string;
+    nodeType: 'chapter' | 'section' | 'subsection';
+    startLine: number;
+    endLine: number;
+  };
+  changedFiles: Array<{
+    path: string;
+    changedRange: {
+      startLine: number;
+      endLine: number;
+    };
+    sha256Before: string;
+    sha256After: string;
+    unchangedContext: {
+      before: boolean;
+      after: boolean;
+    };
+  }>;
+  structure: LatexStructureSnapshot;
+};
+
+type LatexRestorePayload = {
+  thesisId: string;
+  intakeJobId: string;
+  checkpointId: string;
+  restoredFiles: Array<{
+    path: string;
+    sha256Before: string;
+    sha256After: string;
+  }>;
+  structure: LatexStructureSnapshot;
+};
+
 type IntakeExtractionStatus = IntakeReportSummary['extractionStatus'];
 type IntakeNormalizationStatus = IntakeReportSummary['normalizationStatus'];
 type InsertNormalizedNode = typeof normalizedNodes.$inferInsert;
@@ -193,6 +301,7 @@ export type ThesisCheckpointPayload = {
   scope: string;
   reason: string;
   snapshotPath: string | null;
+  snapshotMetadata: Record<string, unknown> | null;
   createdBy: string;
   checkpointedAt: string;
   createdAt: string;
@@ -289,6 +398,7 @@ export type CreateCheckpointInput = {
   scope: string;
   reason: string;
   snapshotPath?: string | null;
+  snapshotMetadata?: Record<string, unknown> | null;
   createdBy: string;
   checkpointedAt?: string;
 };
@@ -320,6 +430,31 @@ export class IntakeBoundaryViolationError extends Error {
       `Import path ${importRootPath} resolves outside thesis ${thesisId} workspace boundary: ${resolvedPath}.`,
     );
     this.name = 'IntakeBoundaryViolationError';
+  }
+}
+
+export class LatexWorkspaceNotReadyError extends Error {
+  constructor(public readonly thesisId: string) {
+    super(`Thesis ${thesisId} does not have an active LaTeX workspace ready for editing.`);
+    this.name = 'LatexWorkspaceNotReadyError';
+  }
+}
+
+export class LatexEditConflictError extends Error {
+  constructor(
+    public readonly thesisId: string,
+    public readonly reasons: string[],
+    public readonly snapshot: LatexStructureSnapshot,
+  ) {
+    super(reasons[0] ?? `LaTeX edit target conflict for thesis ${thesisId}.`);
+    this.name = 'LatexEditConflictError';
+  }
+}
+
+export class LatexCheckpointRestoreError extends Error {
+  constructor(public readonly thesisId: string, public readonly checkpointId: string, message: string) {
+    super(message);
+    this.name = 'LatexCheckpointRestoreError';
   }
 }
 
@@ -512,17 +647,18 @@ export class ThesisLifecycleService {
       scope: input.scope,
       reason: input.reason,
       snapshotPath: input.snapshotPath ?? null,
+      snapshotMetadataJson: JSON.stringify(input.snapshotMetadata ?? null),
       createdBy: input.createdBy,
       checkpointedAt,
       createdAt: checkpointedAt,
       updatedAt: checkpointedAt,
-    });
+    } as typeof checkpoints.$inferInsert);
 
     const checkpoint = await this.db.query.checkpoints.findFirst({
       where: (fields, operators) => operators.eq(fields.id, id),
     });
 
-    return this.mapCheckpointRecord(checkpoint ?? {
+    const fallbackCheckpointRecord = {
       id,
       thesisId,
       label: input.label ?? null,
@@ -530,11 +666,191 @@ export class ThesisLifecycleService {
       scope: input.scope,
       reason: input.reason,
       snapshotPath: input.snapshotPath ?? null,
+      snapshotMetadataJson: JSON.stringify(input.snapshotMetadata ?? null),
       createdBy: input.createdBy,
       checkpointedAt,
       createdAt: checkpointedAt,
       updatedAt: checkpointedAt,
+    };
+
+    return this.mapCheckpointRecord((checkpoint as typeof fallbackCheckpointRecord | null) ?? fallbackCheckpointRecord);
+  }
+
+  async editLatexSection(thesisId: string, input: LatexEditRequest): Promise<LatexEditPayload> {
+    const thesis = await this.requireThesis(thesisId);
+    const activeWorkspace = await this.requireActiveLatexWorkspace(thesisId, thesis.activeImportId);
+    const resolution = this.resolveLatexEditTarget(thesis.workspacePath, activeWorkspace, input.target);
+    const targetSourcePath = resolution.node.sourcePath;
+    if (!targetSourcePath) {
+      throw new LatexEditConflictError(thesisId, ['The requested LaTeX edit target does not resolve to a concrete source file.'], inspectLatexWorkspace(thesis.workspacePath, activeWorkspace.importRootPath));
+    }
+    const filePath = path.join(activeWorkspace.importRootPath, targetSourcePath);
+    const originalContent = fs.readFileSync(filePath, 'utf8');
+    const originalLines = originalContent.split(/\r?\n/);
+    const replacementLines = input.replacement.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    const updatedLines = [
+      ...originalLines.slice(0, resolution.startLine - 1),
+      ...replacementLines,
+      ...originalLines.slice(resolution.endLine),
+    ];
+    const updatedContent = updatedLines.join('\n');
+    const now = new Date().toISOString();
+    const checkpointSnapshotDir = createLatexCheckpointSnapshotDirectory(thesisId, now);
+    const snapshotFilePath = path.join(checkpointSnapshotDir, 'snapshot.json');
+
+    fs.mkdirSync(checkpointSnapshotDir, { recursive: true });
+
+    const checkpointSnapshot = {
+      kind: 'latex-edit',
+      version: 1,
+      thesisId,
+      workspacePath: activeWorkspace.importRootPath,
+      intakeJobId: activeWorkspace.id,
+      checkpointId: 'pending',
+      createdAt: now,
+      target: {
+        normalizedNodeId: resolution.node.normalizedNodeId,
+        sourcePath: targetSourcePath,
+        title: resolution.node.title ?? input.target.title,
+        nodeType: resolution.node.nodeType as 'chapter' | 'section' | 'subsection',
+        startLine: resolution.startLine,
+        endLine: resolution.endLine,
+      },
+      files: [
+        {
+          relativePath: targetSourcePath,
+          content: originalContent,
+          sha256: sha256(originalContent),
+        },
+      ],
+    } satisfies LatexCheckpointSnapshot;
+
+    const checkpoint = await this.createCheckpoint(thesisId, {
+      label: `Checkpoint previo a edición: ${resolution.node.title ?? input.target.title}`,
+      note: input.note ?? `Respaldo antes de editar ${targetSourcePath}:${resolution.startLine}-${resolution.endLine}.`,
+      scope: 'latex-workspace',
+      reason: 'before-latex-edit',
+      snapshotPath: snapshotFilePath,
+      snapshotMetadata: {
+        kind: 'latex-edit',
+        intakeJobId: activeWorkspace.id,
+        sourcePath: targetSourcePath,
+        normalizedNodeId: resolution.node.normalizedNodeId,
+        startLine: resolution.startLine,
+        endLine: resolution.endLine,
+      },
+      createdBy: input.createdBy,
+      checkpointedAt: now,
     });
+
+    checkpointSnapshot.checkpointId = checkpoint.id;
+    fs.writeFileSync(snapshotFilePath, JSON.stringify(checkpointSnapshot, null, 2), 'utf8');
+
+    const tempFilePath = `${filePath}.${checkpoint.id}.tmp`;
+
+    try {
+      fs.writeFileSync(tempFilePath, updatedContent, 'utf8');
+      fs.renameSync(tempFilePath, filePath);
+    } catch (error) {
+      if (fs.existsSync(tempFilePath)) {
+        fs.unlinkSync(tempFilePath);
+      }
+      if (fs.readFileSync(filePath, 'utf8') !== originalContent) {
+        fs.writeFileSync(filePath, originalContent, 'utf8');
+      }
+      throw error;
+    }
+
+    const structure = inspectLatexWorkspace(thesis.workspacePath, activeWorkspace.importRootPath);
+
+    return {
+      thesisId,
+      intakeJobId: activeWorkspace.id,
+      checkpoint,
+      target: {
+        normalizedNodeId: resolution.node.normalizedNodeId,
+        sourcePath: targetSourcePath,
+        title: resolution.node.title ?? input.target.title,
+        nodeType: resolution.node.nodeType as 'chapter' | 'section' | 'subsection',
+        startLine: resolution.startLine,
+        endLine: resolution.endLine,
+      },
+      changedFiles: [
+        {
+          path: targetSourcePath,
+          changedRange: {
+            startLine: resolution.startLine,
+            endLine: resolution.startLine + Math.max(replacementLines.length - 1, 0),
+          },
+          sha256Before: sha256(originalContent),
+          sha256After: sha256(updatedContent),
+          unchangedContext: {
+            before: originalLines.slice(0, resolution.startLine - 1).join('\n') === updatedLines.slice(0, resolution.startLine - 1).join('\n'),
+            after: originalLines.slice(resolution.endLine).join('\n') === updatedLines.slice(resolution.startLine - 1 + replacementLines.length).join('\n'),
+          },
+        },
+      ],
+      structure,
+    };
+  }
+
+  async restoreLatexCheckpoint(thesisId: string, checkpointId: string): Promise<LatexRestorePayload> {
+    const thesis = await this.requireThesis(thesisId);
+    const checkpoint = await this.db.query.checkpoints.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, checkpointId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!checkpoint) {
+      throw new LatexCheckpointRestoreError(thesisId, checkpointId, `Checkpoint ${checkpointId} was not found for thesis ${thesisId}.`);
+    }
+
+    if (!checkpoint.snapshotPath) {
+      throw new LatexCheckpointRestoreError(thesisId, checkpointId, `Checkpoint ${checkpointId} does not contain a restorable snapshot.`);
+    }
+
+    const snapshot = parseLatexCheckpointSnapshot(fs.readFileSync(checkpoint.snapshotPath, 'utf8'));
+    if (!snapshot) {
+      throw new LatexCheckpointRestoreError(thesisId, checkpointId, `Checkpoint ${checkpointId} snapshot metadata is invalid.`);
+    }
+
+    const restoredFiles: LatexRestorePayload['restoredFiles'] = [];
+    const originals = snapshot.files.map((file) => {
+      const absolutePath = path.join(snapshot.workspacePath, file.relativePath);
+      const currentContent = fs.readFileSync(absolutePath, 'utf8');
+      return {
+        absolutePath,
+        relativePath: file.relativePath,
+        currentContent,
+      };
+    });
+
+    try {
+      snapshot.files.forEach((file) => {
+        const absolutePath = path.join(snapshot.workspacePath, file.relativePath);
+        fs.writeFileSync(absolutePath, file.content, 'utf8');
+        restoredFiles.push({
+          path: file.relativePath,
+          sha256Before: sha256(originals.find((entry) => entry.relativePath === file.relativePath)?.currentContent ?? ''),
+          sha256After: file.sha256,
+        });
+      });
+    } catch (error) {
+      originals.forEach((file) => {
+        fs.writeFileSync(file.absolutePath, file.currentContent, 'utf8');
+      });
+      throw error;
+    }
+
+    const structure = inspectLatexWorkspace(thesis.workspacePath, snapshot.workspacePath);
+
+    return {
+      thesisId,
+      intakeJobId: snapshot.intakeJobId,
+      checkpointId,
+      restoredFiles,
+      structure,
+    };
   }
 
   async listCheckpoints(thesisId: string): Promise<ThesisCheckpointPayload[]> {
@@ -547,7 +863,10 @@ export class ThesisLifecycleService {
       .orderBy(desc(checkpoints.checkpointedAt), asc(checkpoints.id))
       .all();
 
-    return rows.map((row) => this.mapCheckpointRecord(row));
+    return rows.map((row) => this.mapCheckpointRecord({
+      ...(row as Omit<Parameters<ThesisLifecycleService['mapCheckpointRecord']>[0], 'snapshotMetadataJson'>),
+      snapshotMetadataJson: null,
+    }));
   }
 
   async createFeedback(thesisId: string, input: CreateFeedbackInput): Promise<ThesisFeedbackPayload> {
@@ -1067,12 +1386,80 @@ export class ThesisLifecycleService {
     scope: string;
     reason: string;
     snapshotPath: string | null;
+    snapshotMetadataJson: string | null;
     createdBy: string;
     checkpointedAt: string;
     createdAt: string;
     updatedAt: string;
   }): ThesisCheckpointPayload {
-    return { ...record };
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      label: record.label,
+      note: record.note,
+      scope: record.scope,
+      reason: record.reason,
+      snapshotPath: record.snapshotPath,
+      snapshotMetadata: parseNullableJsonObject(record.snapshotMetadataJson),
+      createdBy: record.createdBy,
+      checkpointedAt: record.checkpointedAt,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  private async requireActiveLatexWorkspace(thesisId: string, activeImportId: string | null) {
+    if (!activeImportId) {
+      throw new LatexWorkspaceNotReadyError(thesisId);
+    }
+
+    const activeJob = await this.db.query.intakeJobs.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, activeImportId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!activeJob || normalizeSourceFormat(activeJob.sourceFormat) !== 'latex' || normalizeIntakeStatus(activeJob.status) !== 'succeeded') {
+      throw new LatexWorkspaceNotReadyError(thesisId);
+    }
+
+    return activeJob;
+  }
+
+  private resolveLatexEditTarget(workspacePath: string, activeJob: { id: string; importRootPath: string; reportJson: string }, target: LatexEditTarget) {
+    const structure = inspectLatexWorkspace(workspacePath, activeJob.importRootPath);
+    const reasons: string[] = [];
+    const candidates = structure.outline.filter((node) => {
+      if (target.normalizedNodeId && node.normalizedNodeId === target.normalizedNodeId) {
+        return true;
+      }
+
+      return node.sourcePath === target.sourcePath && node.title === target.title && node.nodeType === target.nodeType;
+    });
+
+    if (candidates.length === 0) {
+      reasons.push('The requested LaTeX edit target is stale and no longer maps to the current structure.');
+    } else if (candidates.length > 1) {
+      reasons.push('The requested LaTeX edit target is ambiguous in the current structure.');
+    }
+
+    const candidate = candidates[0];
+    if (!candidate) {
+      throw new LatexEditConflictError(activeJob.id, reasons, structure);
+    }
+
+    if (target.anchorStart !== candidate.anchor.start || (target.anchorEnd ?? candidate.anchor.end ?? null) !== (candidate.anchor.end ?? null)) {
+      reasons.push('The requested LaTeX edit target anchors are stale for the current structure.');
+    }
+
+    if (reasons.length > 0) {
+      throw new LatexEditConflictError(activeJob.id, reasons, structure);
+    }
+
+    return {
+      node: candidate,
+      startLine: Number(candidate.anchor.start),
+      endLine: Number(candidate.anchor.end ?? candidate.anchor.start),
+    };
   }
 
   private mapFeedbackRecord(record: {
@@ -1272,6 +1659,23 @@ function parseJsonObject(value: string): Record<string, unknown> | null {
   }
 }
 
+function parseNullableJsonObject(value: string | null | undefined): Record<string, unknown> | null {
+  if (!value) {
+    return null;
+  }
+
+  return parseJsonObject(value);
+}
+
+function parseLatexCheckpointSnapshot(value: string): LatexCheckpointSnapshot | null {
+  try {
+    const parsed = JSON.parse(value) as LatexCheckpointSnapshot;
+    return parsed?.kind === 'latex-edit' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function canonicalizeInsideBoundary(workspacePath: string, importRootPath: string, thesisId: string) {
   const inputWasAbsolute = path.isAbsolute(importRootPath);
   const normalizedImportRootPath = inputWasAbsolute ? path.resolve(importRootPath) : importRootPath;
@@ -1288,6 +1692,14 @@ function canonicalizeInsideBoundary(workspacePath: string, importRootPath: strin
   }
 
   return resolved;
+}
+
+function createLatexCheckpointSnapshotDirectory(thesisId: string, timestamp: string) {
+  return path.join(process.cwd(), 'tmp', 'latex-checkpoints', thesisId, timestamp.replace(/[:.]/g, '-'));
+}
+
+function sha256(content: string) {
+  return createHash('sha256').update(content).digest('hex');
 }
 
 function resolveBoundaryRoot(workspacePath: string, importRootPath: string) {
@@ -2208,6 +2620,34 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
       cycles,
     },
     outline,
+  };
+}
+
+function inspectLatexWorkspace(workspacePath: string, importRootPath: string): LatexStructureSnapshot {
+  const normalizedPath = canonicalizeInsideBoundary(workspacePath, importRootPath, 'workspace-inspection');
+  const latexOutcome = inspectLatexImport(normalizedPath);
+
+  if (latexOutcome.failures.length > 0 || !latexOutcome.structureSummary) {
+    throw new LatexEditConflictError('workspace-inspection', latexOutcome.failures.map((failure) => failure.message), {
+      entrypoint: latexOutcome.detectedEntrypoint,
+      selection: latexOutcome.structureSummary?.selection ?? {
+        mode: 'missing',
+        reason: 'No current structure available.',
+        candidates: [],
+      },
+      includeGraph: latexOutcome.structureSummary?.includeGraph ?? null,
+      outline: latexOutcome.structureSummary?.outline.map((node) => ({ ...node, normalizedNodeId: node.id })) ?? [],
+    });
+  }
+
+  return {
+    entrypoint: latexOutcome.structureSummary.entrypoint,
+    selection: latexOutcome.structureSummary.selection,
+    includeGraph: latexOutcome.structureSummary.includeGraph,
+    outline: latexOutcome.structureSummary.outline.map((node) => ({
+      ...node,
+      normalizedNodeId: node.id,
+    })),
   };
 }
 
