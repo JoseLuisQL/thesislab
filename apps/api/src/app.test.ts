@@ -1183,6 +1183,252 @@ describe('thesis lifecycle registry routes', () => {
     });
   });
 
+  it('creates claims, links and unlinks evidence, exposes traceability, and keeps zero-evidence state explicit', async () => {
+    const thesisResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis de claims',
+        degreeProgram: 'Doctorado en Sistemas',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-claims',
+      },
+    });
+
+    const thesisId = (thesisResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const sourceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/sources`,
+      payload: {
+        sourceType: 'article',
+        title: 'Traceability Source',
+        authors: ['Ana Investigadora'],
+      },
+    });
+
+    const sourceId = (sourceResponse.json() as { source: { id: string } }).source.id;
+
+    const evidenceAResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/evidence-fragments`,
+      payload: {
+        sourceId,
+        locator: 'p. 10',
+        snippet: 'La fuente respalda la afirmación principal.',
+        extractionMethod: 'manual',
+      },
+    });
+    const evidenceBResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/evidence-fragments`,
+      payload: {
+        sourceId,
+        locator: 'p. 11',
+        snippet: 'La segunda evidencia añade contexto verificable.',
+        extractionMethod: 'manual',
+      },
+    });
+
+    const evidenceAId = (evidenceAResponse.json() as { evidenceFragment: { id: string } }).evidenceFragment.id;
+    const evidenceBId = (evidenceBResponse.json() as { evidenceFragment: { id: string } }).evidenceFragment.id;
+
+    const claimResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/claims`,
+      payload: {
+        text: 'La argumentación del marco teórico está respaldada por evidencia trazable.',
+        status: 'draft',
+        supportSummary: 'Pendiente de enlazar evidencia',
+      },
+    });
+
+    expect(claimResponse.statusCode).toBe(201);
+    const createdClaim = claimResponse.json() as {
+      claim: {
+        id: string;
+        linkedEvidenceCount: number;
+        linkedEvidenceIds: string[];
+        hasEvidence: boolean;
+        traceability: { evidenceFragments: unknown[]; sourceIds: string[] };
+      };
+    };
+
+    expect(createdClaim.claim.linkedEvidenceCount).toBe(0);
+    expect(createdClaim.claim.linkedEvidenceIds).toEqual([]);
+    expect(createdClaim.claim.hasEvidence).toBe(false);
+    expect(createdClaim.claim.traceability.evidenceFragments).toEqual([]);
+    expect(createdClaim.claim.traceability.sourceIds).toEqual([]);
+
+    const linkResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/claims/${createdClaim.claim.id}/evidence-links`,
+      payload: {
+        evidenceFragmentIds: [evidenceAId, evidenceBId],
+        rationale: 'Ambos fragmentos sustentan la afirmación y su procedencia.',
+      },
+    });
+
+    expect(linkResponse.statusCode).toBe(200);
+    const linkedClaim = linkResponse.json() as {
+      claim: {
+        linkedEvidenceCount: number;
+        linkedEvidenceIds: string[];
+        hasEvidence: boolean;
+        traceability: {
+          evidenceFragments: Array<{ id: string; rationale: string; source: { id: string; title: string } }>;
+          sourceIds: string[];
+        };
+      };
+    };
+
+    expect(linkedClaim.claim.linkedEvidenceCount).toBe(2);
+    expect(linkedClaim.claim.linkedEvidenceIds).toEqual([evidenceAId, evidenceBId]);
+    expect(linkedClaim.claim.hasEvidence).toBe(true);
+    expect(linkedClaim.claim.traceability.evidenceFragments).toEqual([
+      expect.objectContaining({
+        id: evidenceAId,
+        rationale: 'Ambos fragmentos sustentan la afirmación y su procedencia.',
+        source: expect.objectContaining({ id: sourceId, title: 'Traceability Source' }),
+      }),
+      expect.objectContaining({
+        id: evidenceBId,
+        rationale: 'Ambos fragmentos sustentan la afirmación y su procedencia.',
+        source: expect.objectContaining({ id: sourceId, title: 'Traceability Source' }),
+      }),
+    ]);
+    expect(linkedClaim.claim.traceability.sourceIds).toEqual([sourceId]);
+
+    const detailResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/claims/${createdClaim.claim.id}`,
+    });
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/claims`,
+    });
+    const sourceDetailResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/sources/${sourceId}`,
+    });
+
+    expect(detailResponse.statusCode).toBe(200);
+    expect(listResponse.statusCode).toBe(200);
+    expect(sourceDetailResponse.statusCode).toBe(200);
+
+    const claimDetail = detailResponse.json() as { claim: { traceability: { evidenceFragments: Array<{ id: string }> } } };
+    const claimList = listResponse.json() as { claims: Array<{ id: string; linkedEvidenceCount: number }> };
+    const sourceDetail = sourceDetailResponse.json() as { source: { evidenceCount: number; claimCount: number } };
+
+    expect(claimDetail.claim.traceability.evidenceFragments.map((fragment) => fragment.id)).toEqual([evidenceAId, evidenceBId]);
+    expect(claimList.claims).toEqual([
+      expect.objectContaining({ id: createdClaim.claim.id, linkedEvidenceCount: 2 }),
+    ]);
+    expect(sourceDetail.source.evidenceCount).toBe(2);
+    expect(sourceDetail.source.claimCount).toBe(1);
+
+    const unlinkResponse = await app.inject({
+      method: 'DELETE',
+      url: `/theses/${thesisId}/claims/${createdClaim.claim.id}/evidence-links/${evidenceAId}`,
+    });
+    const evidenceDetailAfterUnlink = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/evidence-fragments/${evidenceAId}`,
+    });
+
+    expect(unlinkResponse.statusCode).toBe(200);
+    expect(evidenceDetailAfterUnlink.statusCode).toBe(200);
+
+    const unlinkedClaim = unlinkResponse.json() as {
+      claim: { linkedEvidenceIds: string[]; linkedEvidenceCount: number; hasEvidence: boolean };
+    };
+    expect(unlinkedClaim.claim.linkedEvidenceIds).toEqual([evidenceBId]);
+    expect(unlinkedClaim.claim.linkedEvidenceCount).toBe(1);
+    expect(unlinkedClaim.claim.hasEvidence).toBe(true);
+  });
+
+  it('rejects cross-thesis claim-evidence links explicitly', async () => {
+    const thesisAResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis A claims',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-a-claims',
+      },
+    });
+    const thesisBResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis B claims',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-b-claims',
+      },
+    });
+
+    const thesisAId = (thesisAResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const thesisBId = (thesisBResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const sourceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisBId}/sources`,
+      payload: {
+        sourceType: 'article',
+        title: 'Cross Thesis Evidence',
+      },
+    });
+    const sourceId = (sourceResponse.json() as { source: { id: string } }).source.id;
+
+    const evidenceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisBId}/evidence-fragments`,
+      payload: {
+        sourceId,
+        snippet: 'Solo pertenece a la tesis B.',
+        extractionMethod: 'manual',
+      },
+    });
+    const evidenceId = (evidenceResponse.json() as { evidenceFragment: { id: string } }).evidenceFragment.id;
+
+    const claimResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisAId}/claims`,
+      payload: {
+        text: 'Claim de la tesis A',
+      },
+    });
+    const claimId = (claimResponse.json() as { claim: { id: string } }).claim.id;
+
+    const linkResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisAId}/claims/${claimId}/evidence-links`,
+      payload: {
+        evidenceFragmentIds: [evidenceId],
+        rationale: 'No debería permitirse.',
+      },
+    });
+
+    expect(linkResponse.statusCode).toBe(409);
+    expect(linkResponse.json()).toEqual({
+      ok: false,
+      code: 'CLAIM_EVIDENCE_SCOPE_ERROR',
+      message: `Evidence fragment ${evidenceId} is not available for thesis ${thesisAId}.`,
+      thesisId: thesisAId,
+    });
+
+    const claimDetail = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisAId}/claims/${claimId}`,
+    });
+    expect(claimDetail.statusCode).toBe(200);
+    expect((claimDetail.json() as { claim: { linkedEvidenceCount: number; linkedEvidenceIds: string[] } }).claim).toEqual(
+      expect.objectContaining({ linkedEvidenceCount: 0, linkedEvidenceIds: [] }),
+    );
+  });
+
   it('initializes resumable create state and makes successful imports the active workspace for continuation flows', async () => {
     const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-active-workspace-'));
     const latexDir = path.join(fixtureRoot, 'latex-project');

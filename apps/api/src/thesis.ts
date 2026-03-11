@@ -11,6 +11,7 @@ import {
   buildRuns,
   checkpoints,
   claimEvidenceLinks,
+  claims,
   evidenceFragments,
   feedbackEntries,
   intakeJobs,
@@ -527,6 +528,36 @@ export type EvidenceFragmentPayload = {
   updatedAt: string;
 };
 
+export type ClaimPayload = {
+  id: string;
+  thesisId: string;
+  normalizedNodeId: string | null;
+  text: string;
+  status: 'draft' | 'supported' | 'contested' | 'archived';
+  supportSummary: string;
+  linkedEvidenceCount: number;
+  linkedEvidenceIds: string[];
+  hasEvidence: boolean;
+  traceability: {
+    evidenceFragments: Array<{
+      id: string;
+      locator: string | null;
+      snippet: string;
+      extractionMethod: string;
+      rationale: string;
+      source: {
+        id: string;
+        title: string;
+        sourceType: string;
+        status: string;
+      };
+    }>;
+    sourceIds: string[];
+  };
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type RegisterSourceInput = {
   sourceType: 'book' | 'article' | 'web' | 'pdf' | 'note' | 'other';
   title: string;
@@ -556,6 +587,18 @@ export type CreateEvidenceFragmentInput = {
   taskId?: string | null;
 };
 
+export type CreateClaimInput = {
+  text: string;
+  status?: 'draft' | 'supported' | 'contested' | 'archived';
+  supportSummary?: string;
+  normalizedNodeId?: string | null;
+};
+
+export type LinkClaimEvidenceInput = {
+  evidenceFragmentIds: string[];
+  rationale: string;
+};
+
 export class SourceNotFoundError extends Error {
   constructor(public readonly thesisId: string, public readonly sourceId: string) {
     super(`Source ${sourceId} was not found for thesis ${thesisId}.`);
@@ -581,6 +624,20 @@ export class EvidenceContextScopeError extends Error {
   constructor(public readonly thesisId: string, message: string) {
     super(message);
     this.name = 'EvidenceContextScopeError';
+  }
+}
+
+export class ClaimNotFoundError extends Error {
+  constructor(public readonly thesisId: string, public readonly claimId: string) {
+    super(`Claim ${claimId} was not found for thesis ${thesisId}.`);
+    this.name = 'ClaimNotFoundError';
+  }
+}
+
+export class ClaimEvidenceScopeError extends Error {
+  constructor(public readonly thesisId: string, message: string) {
+    super(message);
+    this.name = 'ClaimEvidenceScopeError';
   }
 }
 
@@ -1388,6 +1445,103 @@ export class ThesisLifecycleService {
     return this.getEvidenceFragment(thesisId, id);
   }
 
+  async createClaim(thesisId: string, input: CreateClaimInput): Promise<ClaimPayload> {
+    await this.requireThesis(thesisId);
+
+    if (input.normalizedNodeId) {
+      await this.requireNormalizedNode(thesisId, input.normalizedNodeId);
+    }
+
+    const now = new Date().toISOString();
+    const id = randomUUID();
+
+    await this.db.insert(claims).values({
+      id,
+      thesisId,
+      normalizedNodeId: input.normalizedNodeId ?? null,
+      text: input.text,
+      status: input.status ?? 'draft',
+      supportSummary: input.supportSummary ?? '',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    return this.getClaim(thesisId, id);
+  }
+
+  async listClaims(thesisId: string): Promise<ClaimPayload[]> {
+    await this.requireThesis(thesisId);
+
+    const rows = await this.db
+      .select()
+      .from(claims)
+      .where(eq(claims.thesisId, thesisId))
+      .orderBy(desc(claims.createdAt), asc(claims.id))
+      .all();
+
+    return Promise.all(rows.map((row) => this.mapClaimRecord(row)));
+  }
+
+  async getClaim(thesisId: string, claimId: string): Promise<ClaimPayload> {
+    await this.requireThesis(thesisId);
+    const row = await this.db.query.claims.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, claimId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!row) {
+      throw new ClaimNotFoundError(thesisId, claimId);
+    }
+
+    return this.mapClaimRecord(row);
+  }
+
+  async linkClaimToEvidence(thesisId: string, claimId: string, input: LinkClaimEvidenceInput): Promise<ClaimPayload> {
+    const claim = await this.requireClaim(thesisId, claimId);
+    const evidenceIds = Array.from(new Set(input.evidenceFragmentIds));
+
+    for (const evidenceFragmentId of evidenceIds) {
+      await this.requireEvidenceFragment(thesisId, evidenceFragmentId);
+    }
+
+    const now = new Date().toISOString();
+    for (const evidenceFragmentId of evidenceIds) {
+      const existing = await this.db.query.claimEvidenceLinks.findFirst({
+        where: (fields, operators) =>
+          operators.and(
+            operators.eq(fields.thesisId, thesisId),
+            operators.eq(fields.claimId, claim.id),
+            operators.eq(fields.evidenceFragmentId, evidenceFragmentId),
+          ),
+      });
+
+      if (!existing) {
+        await this.db.insert(claimEvidenceLinks).values({
+          id: randomUUID(),
+          thesisId,
+          claimId: claim.id,
+          evidenceFragmentId,
+          rationale: input.rationale,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    }
+
+    return this.getClaim(thesisId, claimId);
+  }
+
+  async unlinkClaimEvidence(thesisId: string, claimId: string, evidenceFragmentId: string): Promise<ClaimPayload> {
+    await this.requireClaim(thesisId, claimId);
+    await this.requireEvidenceFragment(thesisId, evidenceFragmentId);
+
+    await this.db
+      .delete(claimEvidenceLinks)
+      .where(eq(claimEvidenceLinks.id, await this.requireClaimEvidenceLink(thesisId, claimId, evidenceFragmentId)));
+
+    return this.getClaim(thesisId, claimId);
+  }
+
   async listEvidenceFragments(thesisId: string): Promise<EvidenceFragmentPayload[]> {
     await this.requireThesis(thesisId);
 
@@ -1413,6 +1567,53 @@ export class ThesisLifecycleService {
     }
 
     return this.mapEvidenceFragmentRecord(row);
+  }
+
+  private async requireClaim(thesisId: string, claimId: string) {
+    const row = await this.db.query.claims.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, claimId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!row) {
+      throw new ClaimNotFoundError(thesisId, claimId);
+    }
+
+    return row;
+  }
+
+  private async requireEvidenceFragment(thesisId: string, evidenceFragmentId: string) {
+    const row = await this.db.query.evidenceFragments.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, evidenceFragmentId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!row) {
+      const crossThesis = await this.db.query.evidenceFragments.findFirst({
+        where: (fields, operators) => operators.eq(fields.id, evidenceFragmentId),
+      });
+
+      if (crossThesis) {
+        throw new ClaimEvidenceScopeError(thesisId, `Evidence fragment ${evidenceFragmentId} is not available for thesis ${thesisId}.`);
+      }
+
+      throw new EvidenceFragmentNotFoundError(thesisId, evidenceFragmentId);
+    }
+
+    return row;
+  }
+
+  private async requireClaimEvidenceLink(thesisId: string, claimId: string, evidenceFragmentId: string) {
+    const row = await this.db.query.claimEvidenceLinks.findFirst({
+      where: (fields, operators) =>
+        operators.and(
+          operators.eq(fields.thesisId, thesisId),
+          operators.eq(fields.claimId, claimId),
+          operators.eq(fields.evidenceFragmentId, evidenceFragmentId),
+        ),
+    });
+
+    return row?.id ?? randomUUID();
   }
 
   async getResume(thesisId: string): Promise<ThesisResumePayload> {
@@ -2071,6 +2272,77 @@ export class ThesisLifecycleService {
     };
   }
 
+  private async mapClaimRecord(record: { id: string; thesisId: string; normalizedNodeId: string | null; text: string; status: string; supportSummary: string; createdAt: string; updatedAt: string; }): Promise<ClaimPayload> {
+    const linkRows = await this.db
+      .select()
+      .from(claimEvidenceLinks)
+      .where(eq(claimEvidenceLinks.thesisId, record.thesisId))
+      .all();
+
+    const claimLinks = linkRows
+      .filter((link) => link.claimId === record.id)
+      .sort((left, right) => {
+        if (left.createdAt === right.createdAt) {
+          return left.id.localeCompare(right.id);
+        }
+
+        return left.createdAt.localeCompare(right.createdAt);
+      });
+
+    const evidenceFragmentsPayload = await Promise.all(claimLinks.map(async (link) => {
+      const evidence = await this.db.query.evidenceFragments.findFirst({
+        where: (fields, operators) => operators.eq(fields.id, link.evidenceFragmentId),
+      });
+
+      if (!evidence) {
+        return null;
+      }
+
+      const source = await this.db.query.sources.findFirst({
+        where: (fields, operators) => operators.eq(fields.id, evidence.sourceId),
+      });
+
+      if (!source) {
+        return null;
+      }
+
+      return {
+        id: evidence.id,
+        locator: evidence.locator,
+        snippet: evidence.snippet,
+        extractionMethod: evidence.extractionMethod,
+        rationale: link.rationale,
+        source: {
+          id: source.id,
+          title: source.title,
+          sourceType: source.sourceType,
+          status: source.status,
+        },
+      };
+    }));
+
+    const linkedEvidence = evidenceFragmentsPayload.filter((value): value is NonNullable<typeof value> => value !== null);
+    const linkedEvidenceIds = linkedEvidence.map((evidence) => evidence.id);
+
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      normalizedNodeId: record.normalizedNodeId,
+      text: record.text,
+      status: normalizeClaimStatus(record.status),
+      supportSummary: record.supportSummary,
+      linkedEvidenceCount: linkedEvidence.length,
+      linkedEvidenceIds,
+      hasEvidence: linkedEvidence.length > 0,
+      traceability: {
+        evidenceFragments: linkedEvidence,
+        sourceIds: Array.from(new Set(linkedEvidence.map((evidence) => evidence.source.id))),
+      },
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
   private async countRows(table: typeof evidenceFragments, where: { thesisId: string; sourceId: string }) {
     const rows = await this.db
       .select()
@@ -2363,6 +2635,18 @@ function normalizeEvidenceStatus(value: string): EvidenceFragmentPayload['status
       return value;
     default:
       return 'needs_review';
+  }
+}
+
+function normalizeClaimStatus(value: string): ClaimPayload['status'] {
+  switch (value) {
+    case 'draft':
+    case 'supported':
+    case 'contested':
+    case 'archived':
+      return value;
+    default:
+      return 'draft';
   }
 }
 

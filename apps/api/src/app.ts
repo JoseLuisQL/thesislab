@@ -9,9 +9,12 @@ import { createDatabaseConnection, getMigrationsDirectory } from '@thesis-resear
 import { buildLocalFirstStatusPayload } from './status.js';
 import {
   type CreateCheckpointInput,
+  type CreateClaimInput,
   type CreateFeedbackInput,
   type CreateEvidenceFragmentInput,
   type CreateIntakeJobInput,
+  ClaimEvidenceScopeError,
+  ClaimNotFoundError,
   EvidenceContextScopeError,
   EvidenceFragmentNotFoundError,
   IntakeBoundaryViolationError,
@@ -22,6 +25,7 @@ import {
   LatexWorkspaceNotReadyError,
   SourceNotFoundError,
   type RegisterSourceInput,
+  type LinkClaimEvidenceInput,
   SourceRegistrationConflictError,
   ThesisNotFoundError,
   createThesisLifecycleService,
@@ -90,6 +94,18 @@ const createEvidenceFragmentSchema = z.object({
   provenance: z.record(z.string(), z.unknown()).nullable().optional(),
   normalizedNodeId: z.string().trim().min(1).nullable().optional(),
   taskId: z.string().trim().min(1).nullable().optional(),
+});
+
+const createClaimSchema = z.object({
+  text: z.string().trim().min(1),
+  status: z.enum(['draft', 'supported', 'contested', 'archived']).optional(),
+  supportSummary: z.string().optional(),
+  normalizedNodeId: z.string().trim().min(1).nullable().optional(),
+});
+
+const linkClaimEvidenceSchema = z.object({
+  evidenceFragmentIds: z.array(z.string().trim().min(1)).min(1),
+  rationale: z.string().trim().min(1),
 });
 
 const createIntakeJobSchema = z.object({
@@ -175,10 +191,24 @@ export function createApp() {
       });
     }
 
-    if (error instanceof SourceRegistrationConflictError || error instanceof EvidenceContextScopeError) {
+    if (error instanceof ClaimNotFoundError) {
+      return reply.status(404).send({
+        ok: false,
+        code: 'CLAIM_NOT_FOUND',
+        message: error.message,
+        thesisId: error.thesisId,
+        claimId: error.claimId,
+      });
+    }
+
+    if (error instanceof SourceRegistrationConflictError || error instanceof EvidenceContextScopeError || error instanceof ClaimEvidenceScopeError) {
       return reply.status(409).send({
         ok: false,
-        code: error instanceof SourceRegistrationConflictError ? 'SOURCE_REGISTRATION_CONFLICT' : 'EVIDENCE_CONTEXT_SCOPE_ERROR',
+        code: error instanceof SourceRegistrationConflictError
+          ? 'SOURCE_REGISTRATION_CONFLICT'
+          : error instanceof ClaimEvidenceScopeError
+            ? 'CLAIM_EVIDENCE_SCOPE_ERROR'
+            : 'EVIDENCE_CONTEXT_SCOPE_ERROR',
         message: error.message,
         thesisId: error.thesisId,
       });
@@ -393,6 +423,55 @@ export function createApp() {
     );
 
     return { ok: true, evidenceFragment };
+  });
+
+  app.post('/theses/:thesisId/claims', async (request, reply) => {
+    const payload = createClaimSchema.parse(request.body) as CreateClaimInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const claim = await (await getThesisLifecycle()).service.createClaim(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, claim });
+  });
+
+  app.get('/theses/:thesisId/claims', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const claims = await (await getThesisLifecycle()).service.listClaims(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, claims };
+  });
+
+  app.get('/theses/:thesisId/claims/:claimId', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; claimId: string };
+    const claim = await (await getThesisLifecycle()).service.getClaim(params.thesisId, params.claimId);
+
+    return { ok: true, claim };
+  });
+
+  app.post('/theses/:thesisId/claims/:claimId/evidence-links', async (request) => {
+    const payload = linkClaimEvidenceSchema.parse(request.body) as LinkClaimEvidenceInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; claimId: string };
+    const claim = await (await getThesisLifecycle()).service.linkClaimToEvidence(params.thesisId, params.claimId, payload);
+
+    return { ok: true, claim };
+  });
+
+  app.delete('/theses/:thesisId/claims/:claimId/evidence-links/:evidenceFragmentId', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; claimId: string; evidenceFragmentId: string };
+    const claim = await (await getThesisLifecycle()).service.unlinkClaimEvidence(
+      params.thesisId,
+      params.claimId,
+      params.evidenceFragmentId,
+    );
+
+    return { ok: true, claim };
   });
 
   app.get('/theses/:thesisId/resume', async (request) => {
