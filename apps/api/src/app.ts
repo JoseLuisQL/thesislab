@@ -21,6 +21,7 @@ import {
   ClaimEvidenceLinkNotFoundError,
   ClaimNotFoundError,
   EvidenceContextScopeError,
+  AcademicQaRunNotFoundError,
   EvidenceFragmentNotFoundError,
   IntakeBoundaryViolationError,
   IntakeJobNotFoundError,
@@ -29,6 +30,7 @@ import {
   LatexEditConflictError,
   LatexWorkspaceNotReadyError,
   SourceNotFoundError,
+  PolicyProfileNotFoundError,
   type RegisterSourceInput,
   type LinkClaimEvidenceInput,
   SourceRegistrationConflictError,
@@ -268,6 +270,14 @@ export function createApp() {
       });
     }
 
+    if (error instanceof PolicyProfileNotFoundError) {
+      return reply.status(404).send({
+        ok: false,
+        code: 'POLICY_PROFILE_NOT_FOUND',
+        message: error.message,
+      });
+    }
+
     if (error instanceof EvidenceFragmentNotFoundError) {
       return reply.status(404).send({
         ok: false,
@@ -285,6 +295,16 @@ export function createApp() {
         message: error.message,
         thesisId: error.thesisId,
         claimId: error.claimId,
+      });
+    }
+
+    if (error instanceof AcademicQaRunNotFoundError) {
+      return reply.status(404).send({
+        ok: false,
+        code: 'ACADEMIC_QA_RUN_NOT_FOUND',
+        message: error.message,
+        thesisId: error.thesisId,
+        academicQaRunId: error.academicQaRunId,
       });
     }
 
@@ -418,6 +438,13 @@ export function createApp() {
     });
 
     return { ok: true, items };
+  });
+
+  app.get('/policy-profiles/active', async () => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const policyProfile = await (await getThesisLifecycle()).service.getActivePolicyProfile();
+
+    return { ok: true, policyProfile };
   });
 
   app.post('/theses/:thesisId/zotero-mappings', async (request, reply) => {
@@ -687,6 +714,42 @@ export function createApp() {
     );
 
     return { ok: true, resume };
+  });
+
+  app.post('/theses/:thesisId/compliance-runs', async (request, reply) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const complianceRun = await (await getThesisLifecycle()).service.createComplianceRun(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return reply.status(201).send({ ok: true, complianceRun });
+  });
+
+  app.post('/theses/:thesisId/academic-qa-runs', async (request, reply) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const academicQaRun = await (await getThesisLifecycle()).service.createAcademicQaRun(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return reply.status(201).send({ ok: true, academicQaRun });
+  });
+
+  app.get('/theses/:thesisId/compliance-runs', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const complianceRuns = await (await getThesisLifecycle()).service.listComplianceRuns(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, complianceRuns };
+  });
+
+  app.get('/theses/:thesisId/academic-qa-runs', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const academicQaRuns = await (await getThesisLifecycle()).service.listAcademicQaRuns(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, academicQaRuns };
   });
 
   app.post('/theses/:thesisId/intake-jobs', async (request, reply) => {

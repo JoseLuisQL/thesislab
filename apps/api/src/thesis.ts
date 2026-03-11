@@ -7,7 +7,11 @@ import zlib from 'node:zlib';
 import { asc, desc, eq } from 'drizzle-orm';
 
 import {
+  academicQaIssues,
+  academicQaRuns,
   createDatabaseConnection,
+  complianceIssues,
+  complianceRuns,
   buildRuns,
   checkpoints,
   claimEvidenceLinks,
@@ -16,6 +20,7 @@ import {
   feedbackEntries,
   intakeJobs,
   normalizedNodes,
+  policyProfiles,
   sources,
   zoteroMappings,
   type IntakeStatus,
@@ -788,6 +793,142 @@ export type ZoteroMappingPayload = {
   updatedAt: string;
 };
 
+type PolicyRuleDisposition = 'pass' | 'violation' | 'warning' | 'skipped';
+
+type PolicyRuleDefinition = {
+  id: string;
+  title: string;
+  description: string;
+  category: 'structure' | 'metadata';
+  severity: 'warning' | 'violation';
+  remediation: string;
+  requiredSectionTitle?: string;
+  minimumDocumentChildren?: number;
+};
+
+export type PolicyProfilePayload = {
+  id: string;
+  institutionId: string;
+  institution: string;
+  faculty: string;
+  version: string;
+  title: string;
+  requiredSections: string[];
+  rules: Array<PolicyRuleDefinition & { disposition: PolicyRuleDisposition }>;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ComplianceRunSummary = {
+  degradedConfidence: boolean;
+  warnings: string[];
+  evaluatedNodeCount: number;
+  structureSelectionMode: string | null;
+};
+
+type ComplianceRuleResultPayload = {
+  ruleId: string;
+  title: string;
+  category: PolicyRuleDefinition['category'];
+  disposition: PolicyRuleDisposition;
+  severity: 'warning' | 'violation' | null;
+  issueId: string | null;
+  normalizedNodeId: string | null;
+  message: string;
+  remediation: string | null;
+};
+
+export type ComplianceIssuePayload = {
+  id: string;
+  thesisId: string;
+  complianceRunId: string;
+  policyProfileId: string;
+  ruleId: string;
+  normalizedNodeId: string | null;
+  severity: 'warning' | 'violation';
+  message: string;
+  remediation: string | null;
+  disposition: PolicyRuleDisposition;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ComplianceRunPayload = {
+  id: string;
+  thesisId: string;
+  policyProfileId: string;
+  policyProfileVersion: string;
+  policyInstitutionId: string;
+  status: 'completed' | 'completed_with_warnings' | 'failed';
+  summary: ComplianceRunSummary;
+  counts: {
+    evaluated: number;
+    warnings: number;
+    skipped: number;
+    violations: number;
+  };
+  ruleResults: ComplianceRuleResultPayload[];
+  issues: ComplianceIssuePayload[];
+  startedAt: string;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AcademicQaIssueCategory = 'evidence-gap' | 'citation-weakness' | 'methodology' | 'coherence';
+
+export type AcademicQaIssuePayload = {
+  id: string;
+  thesisId: string;
+  academicQaRunId: string;
+  claimId: string | null;
+  normalizedNodeId: string | null;
+  category: AcademicQaIssueCategory;
+  severity: 'warning' | 'issue';
+  message: string;
+  rationale: string;
+  remediation: string | null;
+  triggeringCondition: string;
+  groundedIn: {
+    entityType: 'claim' | 'section';
+    entityId: string;
+  };
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AcademicQaRunPayload = {
+  id: string;
+  thesisId: string;
+  status: 'completed' | 'completed_with_warnings';
+  issueCategories: AcademicQaIssueCategory[];
+  assessedScope: {
+    claimIds: string[];
+    normalizedNodeIds: string[];
+    counts: {
+      claims: number;
+      sections: number;
+    };
+  };
+  skippedScope: Array<{
+    entityType: 'claim' | 'section';
+    entityId: string;
+    reason: string;
+  }>;
+  summary: {
+    findingsByCategory: Record<AcademicQaIssueCategory, number>;
+    assessedClaimCount: number;
+    assessedSectionCount: number;
+    skippedCount: number;
+  };
+  issues: AcademicQaIssuePayload[];
+  startedAt: string;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type CreateZoteroMappingInput = {
   scope: ZoteroMappingScope;
   normalizedNodeId?: string | null;
@@ -989,6 +1130,20 @@ export class ZoteroMappingNotFoundError extends Error {
   }
 }
 
+export class PolicyProfileNotFoundError extends Error {
+  constructor() {
+    super('No active policy profile is configured.');
+    this.name = 'PolicyProfileNotFoundError';
+  }
+}
+
+export class AcademicQaRunNotFoundError extends Error {
+  constructor(public readonly thesisId: string, public readonly academicQaRunId: string) {
+    super(`Academic QA run ${academicQaRunId} was not found for thesis ${thesisId}.`);
+    this.name = 'AcademicQaRunNotFoundError';
+  }
+}
+
 export class ThesisLifecycleService {
   constructor(private readonly db: ThesisDbClient) {}
 
@@ -1017,6 +1172,341 @@ export class ThesisLifecycleService {
       libraryKey: input.libraryKey ?? null,
       collectionKey: input.collectionKey ?? null,
     });
+  }
+
+  async getActivePolicyProfile(): Promise<PolicyProfilePayload> {
+    await ensureSeedPolicyProfile(this.db);
+
+    const record = await this.db.query.policyProfiles.findFirst({
+      where: (fields, operators) => operators.eq(fields.isActive, true),
+    });
+
+    if (!record) {
+      throw new PolicyProfileNotFoundError();
+    }
+
+    return this.mapPolicyProfileRecord(record);
+  }
+
+  async createComplianceRun(thesisId: string): Promise<ComplianceRunPayload> {
+    const thesis = await this.requireThesis(thesisId);
+    const policyProfile = await this.getActivePolicyProfile();
+    const activeWorkspace = await this.getActiveWorkspace(thesis.id, thesis.activeImportId);
+    const allNodes = thesis.activeImportId ? await this.listNormalizedNodes(thesisId, thesis.activeImportId) : [];
+    const sectionNodes = allNodes.filter((node) => ['chapter', 'section', 'subsection'].includes(node.nodeType));
+    const degradedConfidence = activeWorkspace?.detectedFormat === 'pdf';
+    const degradedWarnings = degradedConfidence
+      ? ['La confianza de estructura es baja; algunas reglas se degradaron a advertencias o se omitieron.']
+      : [];
+
+    const runId = randomUUID();
+    const startedAt = new Date().toISOString();
+    const evaluatedRuleResults = evaluatePolicyRules({
+      thesisId,
+      policyProfile,
+      sectionNodes,
+      degradedConfidence,
+    }).map((result) => ({
+      ...result,
+      issue: result.issue
+        ? {
+            ...result.issue,
+            complianceRunId: runId,
+          }
+        : null,
+    }));
+    const completedAt = new Date().toISOString();
+    const counts = {
+      evaluated: evaluatedRuleResults.filter((result) => result.disposition !== 'skipped').length,
+      warnings: evaluatedRuleResults.filter((result) => result.disposition === 'warning').length,
+      skipped: evaluatedRuleResults.filter((result) => result.disposition === 'skipped').length,
+      violations: evaluatedRuleResults.filter((result) => result.disposition === 'violation').length,
+    };
+    const status = counts.violations > 0
+      ? 'completed'
+      : counts.warnings > 0
+        ? 'completed_with_warnings'
+        : 'completed';
+    const summary: ComplianceRunSummary = {
+      degradedConfidence,
+      warnings: degradedWarnings,
+      evaluatedNodeCount: sectionNodes.length,
+      structureSelectionMode: activeWorkspace?.selectionMode ?? null,
+    };
+
+    await this.db.transaction(async (tx) => {
+      await tx.insert(complianceRuns).values({
+        id: runId,
+        thesisId,
+        policyProfileId: policyProfile.id,
+        status,
+        summaryJson: JSON.stringify({
+          ...summary,
+          ruleResults: evaluatedRuleResults,
+          policyProfileVersion: policyProfile.version,
+          policyInstitutionId: policyProfile.institutionId,
+        }),
+        evaluatedRuleCount: counts.evaluated,
+        warningRuleCount: counts.warnings,
+        skippedRuleCount: counts.skipped,
+        startedAt,
+        completedAt,
+        createdAt: startedAt,
+        updatedAt: completedAt,
+      });
+
+      const issueRows = evaluatedRuleResults
+        .filter((result) => result.issue)
+        .map((result) => result.issue!);
+
+      if (issueRows.length > 0) {
+        await tx.insert(complianceIssues).values(issueRows);
+      }
+
+      await tx
+        .update(theses)
+        .set({
+          latestStatusAt: completedAt,
+          updatedAt: completedAt,
+        })
+        .where(eq(theses.id, thesisId));
+    });
+
+    return this.getComplianceRun(thesisId, runId);
+  }
+
+  async createAcademicQaRun(thesisId: string): Promise<AcademicQaRunPayload> {
+    const thesis = await this.requireThesis(thesisId);
+    const activeWorkspace = await this.getActiveWorkspace(thesis.id, thesis.activeImportId);
+    const allNodes = thesis.activeImportId ? await this.listNormalizedNodes(thesisId, thesis.activeImportId) : [];
+    const sectionNodes = allNodes.filter((node) => ['chapter', 'section', 'subsection'].includes(node.nodeType));
+    const claimsPayload = await this.listClaims(thesisId);
+    const evidenceFragments = await this.listEvidenceFragments(thesisId);
+    const zoteroMappings = await this.listZoteroMappings(thesisId);
+    const evidenceById = new Map(evidenceFragments.map((fragment) => [fragment.id, fragment]));
+    const sectionById = new Map(sectionNodes.map((node) => [node.id, node]));
+    const sectionEvidenceIds = new Map<string, string[]>();
+
+    for (const fragment of evidenceFragments) {
+      if (!fragment.normalizedNodeId) {
+        continue;
+      }
+
+      const current = sectionEvidenceIds.get(fragment.normalizedNodeId) ?? [];
+      current.push(fragment.id);
+      sectionEvidenceIds.set(fragment.normalizedNodeId, current);
+    }
+
+    const runId = randomUUID();
+    const startedAt = new Date().toISOString();
+    const issueRows: typeof academicQaIssues.$inferInsert[] = [];
+    const skippedScope: AcademicQaRunPayload['skippedScope'] = [];
+
+    for (const claim of claimsPayload) {
+      if (!claim.normalizedNodeId) {
+        skippedScope.push({ entityType: 'claim', entityId: claim.id, reason: 'Claim is not linked to a thesis section.' });
+        continue;
+      }
+
+      if (!sectionById.has(claim.normalizedNodeId)) {
+        skippedScope.push({
+          entityType: 'claim',
+          entityId: claim.id,
+          reason: 'Claim references a section that is not available in the active workspace.',
+        });
+        continue;
+      }
+
+      if (claim.linkedEvidenceCount === 0) {
+        issueRows.push(this.buildAcademicQaIssueRecord({
+          thesisId,
+          academicQaRunId: runId,
+          claimId: claim.id,
+          normalizedNodeId: claim.normalizedNodeId,
+          category: 'evidence-gap',
+          severity: 'issue',
+          message: 'El claim no tiene evidencia vinculada.',
+          rationale: 'No hay fragmentos de evidencia enlazados al claim, por lo que no puede trazarse soporte verificable.',
+          remediation: 'Vincula al menos un fragmento de evidencia verificable o reformula el claim para reflejar su nivel actual de soporte.',
+          triggeringCondition: 'zero-evidence',
+        }));
+        continue;
+      }
+
+      const linkedEvidence = claim.linkedEvidenceIds
+        .map((id) => evidenceById.get(id))
+        .filter((value): value is EvidenceFragmentPayload => value !== undefined);
+      const uniqueSources = new Set(linkedEvidence.map((fragment) => fragment.source.id));
+
+      if (uniqueSources.size < 2) {
+        issueRows.push(this.buildAcademicQaIssueRecord({
+          thesisId,
+          academicQaRunId: runId,
+          claimId: claim.id,
+          normalizedNodeId: claim.normalizedNodeId,
+          category: 'citation-weakness',
+          severity: 'warning',
+          message: 'El claim depende de una base bibliográfica débil.',
+          rationale: 'El soporte trazable del claim proviene de menos de dos fuentes distintas, lo que debilita la solidez citacional.',
+          remediation: 'Añade una segunda fuente independiente o conecta una referencia bibliográfica complementaria al mismo claim.',
+          triggeringCondition: 'weak-citation-support',
+        }));
+      }
+    }
+
+    for (const section of sectionNodes) {
+      const title = section.title?.trim() ?? '';
+      const lowerTitle = title.toLocaleLowerCase();
+      const sectionEvidenceCount = (sectionEvidenceIds.get(section.id) ?? []).length;
+      const hasZoteroMapping = zoteroMappings.some((mapping) => mapping.normalizedNodeId === section.id);
+
+      if (lowerTitle.includes('metodolog') && section.nodeType === 'section' && sectionEvidenceCount === 0) {
+        issueRows.push(this.buildAcademicQaIssueRecord({
+          thesisId,
+          academicQaRunId: runId,
+          claimId: null,
+          normalizedNodeId: section.id,
+          category: 'methodology',
+          severity: 'issue',
+          message: 'La sección metodológica carece de soporte verificable.',
+          rationale: 'La metodología aparece en la estructura activa pero no tiene evidencia ni fuentes contextualizadas para justificar el enfoque descrito.',
+          remediation: 'Añade evidencia de diseño metodológico, referencias de técnicas empleadas o notas de validación asociadas a esta sección.',
+          triggeringCondition: 'methodology-no-support',
+        }));
+      }
+
+      if ((lowerTitle.includes('result') || lowerTitle.includes('hallazgo')) && section.nodeType === 'section' && !hasZoteroMapping) {
+        issueRows.push(this.buildAcademicQaIssueRecord({
+          thesisId,
+          academicQaRunId: runId,
+          claimId: null,
+          normalizedNodeId: section.id,
+          category: 'coherence',
+          severity: 'warning',
+          message: 'La sección de resultados no muestra un anclaje bibliográfico suficiente.',
+          rationale: 'La sección evaluada no tiene vínculos bibliográficos asociados, lo que dificulta verificar la coherencia entre hallazgos y marco de referencia.',
+          remediation: 'Asocia referencias Zotero o evidencia contextual que conecte los resultados con el marco teórico y la discusión.',
+          triggeringCondition: 'missing-bibliography-linkage',
+        }));
+      }
+    }
+
+    if (!activeWorkspace) {
+      skippedScope.push({ entityType: 'section', entityId: 'active-workspace', reason: 'No active normalized workspace is available for academic QA.' });
+    }
+
+    const completedAt = new Date().toISOString();
+    const findingsByCategory = issueRows.reduce<Record<AcademicQaIssueCategory, number>>((accumulator, issue) => {
+      const key = this.normalizeAcademicQaIssueCategory(issue.category);
+      accumulator[key] += 1;
+      return accumulator;
+    }, {
+      'evidence-gap': 0,
+      'citation-weakness': 0,
+      methodology: 0,
+      coherence: 0,
+    });
+
+    const assessedClaimIds = claimsPayload.filter((claim) => claim.normalizedNodeId && sectionById.has(claim.normalizedNodeId)).map((claim) => claim.id);
+    const assessedScope = {
+      claimIds: assessedClaimIds,
+      normalizedNodeIds: sectionNodes.map((node) => node.id),
+      counts: {
+        claims: assessedClaimIds.length,
+        sections: sectionNodes.length,
+      },
+    };
+    const status = issueRows.some((issue) => issue.severity === 'issue') ? 'completed' : 'completed_with_warnings';
+    const summary = {
+      findingsByCategory,
+      assessedClaimCount: assessedScope.counts.claims,
+      assessedSectionCount: assessedScope.counts.sections,
+      skippedCount: skippedScope.length,
+    };
+
+    await this.db.transaction(async (tx) => {
+      await tx.insert(academicQaRuns).values({
+        id: runId,
+        thesisId,
+        status,
+        assessedScopeJson: JSON.stringify(assessedScope),
+        skippedScopeJson: JSON.stringify(skippedScope),
+        summaryJson: JSON.stringify(summary),
+        startedAt,
+        completedAt,
+        createdAt: startedAt,
+        updatedAt: completedAt,
+      });
+
+      if (issueRows.length > 0) {
+        await tx.insert(academicQaIssues).values(issueRows.map((issue) => ({
+          ...issue,
+          createdAt: startedAt,
+          updatedAt: completedAt,
+        })));
+      }
+
+      await tx
+        .update(theses)
+        .set({ latestStatusAt: completedAt, updatedAt: completedAt })
+        .where(eq(theses.id, thesisId));
+    });
+
+    return this.getAcademicQaRun(thesisId, runId);
+  }
+
+  async listAcademicQaRuns(thesisId: string): Promise<AcademicQaRunPayload[]> {
+    await this.requireThesis(thesisId);
+
+    const rows = await this.db
+      .select()
+      .from(academicQaRuns)
+      .where(eq(academicQaRuns.thesisId, thesisId))
+      .orderBy(desc(academicQaRuns.startedAt), asc(academicQaRuns.id))
+      .all();
+
+    return Promise.all(rows.map((row) => this.mapAcademicQaRunRecord(row)));
+  }
+
+  async getAcademicQaRun(thesisId: string, academicQaRunId: string): Promise<AcademicQaRunPayload> {
+    await this.requireThesis(thesisId);
+    const row = await this.db.query.academicQaRuns.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, academicQaRunId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!row) {
+      throw new AcademicQaRunNotFoundError(thesisId, academicQaRunId);
+    }
+
+    return this.mapAcademicQaRunRecord(row);
+  }
+
+  async listComplianceRuns(thesisId: string): Promise<ComplianceRunPayload[]> {
+    await this.requireThesis(thesisId);
+
+    const rows = await this.db
+      .select()
+      .from(complianceRuns)
+      .where(eq(complianceRuns.thesisId, thesisId))
+      .orderBy(desc(complianceRuns.startedAt), asc(complianceRuns.id))
+      .all();
+
+    return Promise.all(rows.map((row) => this.mapComplianceRunRecord(row)));
+  }
+
+  async getComplianceRun(thesisId: string, complianceRunId: string): Promise<ComplianceRunPayload> {
+    await this.requireThesis(thesisId);
+    const row = await this.db.query.complianceRuns.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, complianceRunId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!row) {
+      throw new ThesisNotFoundError(thesisId);
+    }
+
+    return this.mapComplianceRunRecord(row);
   }
 
   async createZoteroMapping(thesisId: string, input: CreateZoteroMappingInput): Promise<ZoteroMappingPayload> {
@@ -3044,6 +3534,214 @@ export class ThesisLifecycleService {
       updatedAt: record.updatedAt,
     };
   }
+
+  private mapPolicyProfileRecord(record: typeof policyProfiles.$inferSelect): PolicyProfilePayload {
+    const requiredSections = parseStringArray(record.requiredSectionsJson);
+    const rules = parsePolicyRuleDefinitions(record.ruleDefinitionsJson).map((rule) => ({
+      ...rule,
+      disposition: 'pass' as const,
+    }));
+
+    return {
+      id: record.id,
+      institutionId: createInstitutionId(record.institution, record.faculty),
+      institution: record.institution,
+      faculty: record.faculty,
+      version: record.version,
+      title: record.title,
+      requiredSections,
+      rules,
+      isActive: record.isActive,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  private async mapComplianceRunRecord(record: typeof complianceRuns.$inferSelect): Promise<ComplianceRunPayload> {
+    const summaryPayload = parseJsonObject(record.summaryJson) ?? {};
+    const policyProfile = await this.db.query.policyProfiles.findFirst({
+      where: (fields, operators) => operators.eq(fields.id, record.policyProfileId),
+    });
+
+    if (!policyProfile) {
+      throw new PolicyProfileNotFoundError();
+    }
+
+    const issues = await this.db
+      .select()
+      .from(complianceIssues)
+      .where(eq(complianceIssues.complianceRunId, record.id))
+      .orderBy(asc(complianceIssues.ruleId), asc(complianceIssues.id))
+      .all();
+
+    const mappedIssues = issues.map((issue) => this.mapComplianceIssueRecord(issue));
+    const issueByRule = new Map(mappedIssues.map((issue) => [issue.ruleId, issue]));
+    const persistedRuleResults = parseComplianceRuleResults(summaryPayload.ruleResults);
+    const profilePayload = this.mapPolicyProfileRecord(policyProfile);
+    const ruleResults = profilePayload.rules.map((rule) => {
+      const persisted = persistedRuleResults.find((candidate) => candidate.ruleId === rule.id);
+      const issue = issueByRule.get(rule.id) ?? null;
+      return {
+        ruleId: rule.id,
+        title: rule.title,
+        category: rule.category,
+        disposition: persisted?.disposition ?? issue?.disposition ?? 'pass',
+        severity: persisted?.severity ?? issue?.severity ?? null,
+        issueId: issue?.id ?? persisted?.issueId ?? null,
+        normalizedNodeId: issue?.normalizedNodeId ?? persisted?.normalizedNodeId ?? null,
+        message: issue?.message ?? persisted?.message ?? rule.description,
+        remediation: issue?.remediation ?? persisted?.remediation ?? rule.remediation,
+      } satisfies ComplianceRuleResultPayload;
+    });
+
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      policyProfileId: record.policyProfileId,
+      policyProfileVersion: typeof summaryPayload.policyProfileVersion === 'string' ? summaryPayload.policyProfileVersion : policyProfile.version,
+      policyInstitutionId: typeof summaryPayload.policyInstitutionId === 'string'
+        ? summaryPayload.policyInstitutionId
+        : createInstitutionId(policyProfile.institution, policyProfile.faculty),
+      status: normalizeComplianceRunStatus(record.status),
+      summary: {
+        degradedConfidence: summaryPayload.degradedConfidence === true,
+        warnings: Array.isArray(summaryPayload.warnings)
+          ? summaryPayload.warnings.filter((warning): warning is string => typeof warning === 'string')
+          : [],
+        evaluatedNodeCount: typeof summaryPayload.evaluatedNodeCount === 'number' ? summaryPayload.evaluatedNodeCount : 0,
+        structureSelectionMode: typeof summaryPayload.structureSelectionMode === 'string' ? summaryPayload.structureSelectionMode : null,
+      },
+      counts: {
+        evaluated: record.evaluatedRuleCount,
+        warnings: record.warningRuleCount,
+        skipped: record.skippedRuleCount,
+        violations: ruleResults.filter((result) => result.disposition === 'violation').length,
+      },
+      ruleResults,
+      issues: mappedIssues,
+      startedAt: record.startedAt,
+      completedAt: record.completedAt,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  private mapComplianceIssueRecord(record: typeof complianceIssues.$inferSelect): ComplianceIssuePayload {
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      complianceRunId: record.complianceRunId,
+      policyProfileId: record.policyProfileId,
+      ruleId: record.ruleId,
+      normalizedNodeId: record.normalizedNodeId,
+      severity: record.severity === 'warning' ? 'warning' : 'violation',
+      message: record.message,
+      remediation: record.remediation,
+      disposition: normalizePolicyRuleDisposition(record.disposition),
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  private async mapAcademicQaRunRecord(record: typeof academicQaRuns.$inferSelect): Promise<AcademicQaRunPayload> {
+    const assessedScope = parseAcademicQaAssessedScope(record.assessedScopeJson);
+    const skippedScope = parseAcademicQaSkippedScope(record.skippedScopeJson);
+    const summary = parseAcademicQaSummary(record.summaryJson, assessedScope, skippedScope);
+    const issues = await this.db
+      .select()
+      .from(academicQaIssues)
+      .where(eq(academicQaIssues.academicQaRunId, record.id))
+      .orderBy(asc(academicQaIssues.category), asc(academicQaIssues.id))
+      .all();
+    const mappedIssues = issues.map((issue) => this.mapAcademicQaIssueRecord(issue));
+    const issueCategories = Array.from(new Set(mappedIssues.map((issue) => issue.category))).sort() as AcademicQaIssueCategory[];
+
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      status: normalizeAcademicQaRunStatus(record.status),
+      issueCategories,
+      assessedScope,
+      skippedScope,
+      summary,
+      issues: mappedIssues,
+      startedAt: record.startedAt,
+      completedAt: record.completedAt,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  private mapAcademicQaIssueRecord(record: typeof academicQaIssues.$inferSelect): AcademicQaIssuePayload {
+    const category = this.normalizeAcademicQaIssueCategory(record.category);
+    const groundedEntityType = record.claimId ? 'claim' : 'section';
+    const groundedEntityId = record.claimId ?? record.normalizedNodeId ?? '';
+
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      academicQaRunId: record.academicQaRunId,
+      claimId: record.claimId,
+      normalizedNodeId: record.normalizedNodeId,
+      category,
+      severity: record.severity === 'issue' ? 'issue' : 'warning',
+      message: record.message,
+      rationale: record.rationale,
+      remediation: record.remediation,
+      triggeringCondition: record.triggeringCondition,
+      groundedIn: {
+        entityType: groundedEntityType,
+        entityId: groundedEntityId,
+      },
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  private buildAcademicQaIssueRecord(input: {
+    thesisId: string;
+    academicQaRunId: string;
+    claimId: string | null;
+    normalizedNodeId: string | null;
+    category: AcademicQaIssueCategory;
+    severity: 'warning' | 'issue';
+    message: string;
+    rationale: string;
+    remediation: string | null;
+    triggeringCondition: string;
+  }): typeof academicQaIssues.$inferInsert {
+    return {
+      id: createAcademicQaIssueId(input),
+      thesisId: input.thesisId,
+      academicQaRunId: input.academicQaRunId,
+      claimId: input.claimId,
+      normalizedNodeId: input.normalizedNodeId,
+      category: input.category.replace(/-/g, '_'),
+      severity: input.severity,
+      message: input.message,
+      rationale: input.rationale,
+      remediation: input.remediation,
+      triggeringCondition: input.triggeringCondition,
+      createdAt: '',
+      updatedAt: '',
+    };
+  }
+
+  private normalizeAcademicQaIssueCategory(category: string): AcademicQaIssueCategory {
+    switch (category) {
+      case 'evidence_gap':
+      case 'evidence-gap':
+        return 'evidence-gap';
+      case 'citation_weakness':
+      case 'citation-weakness':
+        return 'citation-weakness';
+      case 'methodology':
+        return 'methodology';
+      case 'coherence':
+      default:
+        return 'coherence';
+    }
+  }
 }
 
 export function createThesisLifecycleService(databaseUrl?: string) {
@@ -3320,6 +4018,446 @@ function parseIntakeReport(value: string): IntakeReportSummary | null {
   } catch {
     return null;
   }
+}
+
+const SEEDED_POLICY_PROFILE_ID = 'policy-profile-universidad-demo-ingenieria-v1';
+
+const SEEDED_POLICY_RULES: PolicyRuleDefinition[] = [
+  {
+    id: 'structure.required-introduction',
+    title: 'Introducción obligatoria',
+    description: 'La tesis debe incluir una sección o capítulo de introducción.',
+    category: 'structure',
+    severity: 'violation',
+    remediation: 'Añade una sección de Introducción con el contexto del problema y el objetivo general.',
+    requiredSectionTitle: 'Introducción',
+  },
+  {
+    id: 'structure.required-methodology',
+    title: 'Metodología obligatoria',
+    description: 'La tesis debe describir la metodología utilizada.',
+    category: 'structure',
+    severity: 'violation',
+    remediation: 'Añade una sección de Metodología que detalle el enfoque de investigación.',
+    requiredSectionTitle: 'Metodología',
+  },
+  {
+    id: 'structure.required-results',
+    title: 'Resultados obligatorios',
+    description: 'La tesis debe presentar una sección de resultados.',
+    category: 'structure',
+    severity: 'violation',
+    remediation: 'Añade una sección de Resultados con los hallazgos principales.',
+    requiredSectionTitle: 'Resultados',
+  },
+  {
+    id: 'structure.required-conclusions',
+    title: 'Conclusiones obligatorias',
+    description: 'La tesis debe cerrar con una sección de conclusiones.',
+    category: 'structure',
+    severity: 'violation',
+    remediation: 'Añade una sección de Conclusiones con el cierre y trabajo futuro.',
+    requiredSectionTitle: 'Conclusiones',
+  },
+  {
+    id: 'metadata.min-section-count',
+    title: 'Mínimo de secciones estructurales',
+    description: 'La estructura normalizada debe contener al menos dos secciones principales evaluables.',
+    category: 'metadata',
+    severity: 'warning',
+    remediation: 'Amplía la estructura visible de la tesis antes de ejecutar la validación final.',
+    minimumDocumentChildren: 2,
+  },
+];
+
+async function ensureSeedPolicyProfile(db: ThesisDbClient) {
+  const existing = await db.query.policyProfiles.findFirst({
+    where: (fields, operators) => operators.eq(fields.id, SEEDED_POLICY_PROFILE_ID),
+  });
+
+  if (existing) {
+    if (!existing.isActive) {
+      await db
+        .update(policyProfiles)
+        .set({ isActive: true, updatedAt: new Date().toISOString() })
+        .where(eq(policyProfiles.id, SEEDED_POLICY_PROFILE_ID));
+    }
+
+    return;
+  }
+
+  const now = new Date().toISOString();
+  await db.insert(policyProfiles).values({
+    id: SEEDED_POLICY_PROFILE_ID,
+    institution: 'Universidad Demo',
+    faculty: 'Ingeniería',
+    version: '2026.1',
+    title: 'Perfil de cumplimiento v1 para Facultad de Ingeniería',
+    requiredSectionsJson: JSON.stringify([
+      'Introducción',
+      'Metodología',
+      'Resultados',
+      'Conclusiones',
+    ]),
+    ruleDefinitionsJson: JSON.stringify(SEEDED_POLICY_RULES),
+    isActive: true,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+function createInstitutionId(institution: string, faculty: string) {
+  return `${slugify(institution)}::${slugify(faculty)}`;
+}
+
+function parsePolicyRuleDefinitions(value: string): PolicyRuleDefinition[] {
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') {
+        return [];
+      }
+
+      const candidate = entry as Partial<PolicyRuleDefinition>;
+      if (
+        typeof candidate.id !== 'string' ||
+        typeof candidate.title !== 'string' ||
+        typeof candidate.description !== 'string' ||
+        (candidate.category !== 'structure' && candidate.category !== 'metadata') ||
+        (candidate.severity !== 'warning' && candidate.severity !== 'violation') ||
+        typeof candidate.remediation !== 'string'
+      ) {
+        return [];
+      }
+
+      return [{
+        id: candidate.id,
+        title: candidate.title,
+        description: candidate.description,
+        category: candidate.category,
+        severity: candidate.severity,
+        remediation: candidate.remediation,
+        requiredSectionTitle: typeof candidate.requiredSectionTitle === 'string' ? candidate.requiredSectionTitle : undefined,
+        minimumDocumentChildren: typeof candidate.minimumDocumentChildren === 'number' ? candidate.minimumDocumentChildren : undefined,
+      } satisfies PolicyRuleDefinition];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function normalizePolicyRuleDisposition(value: string): PolicyRuleDisposition {
+  switch (value) {
+    case 'pass':
+    case 'violation':
+    case 'warning':
+    case 'skipped':
+      return value;
+    default:
+      return 'warning';
+  }
+}
+
+function normalizeComplianceRunStatus(value: string): ComplianceRunPayload['status'] {
+  switch (value) {
+    case 'completed':
+    case 'completed_with_warnings':
+    case 'failed':
+      return value;
+    default:
+      return 'failed';
+  }
+}
+
+function normalizeAcademicQaRunStatus(value: string): AcademicQaRunPayload['status'] {
+  return value === 'completed_with_warnings' ? 'completed_with_warnings' : 'completed';
+}
+
+function createAcademicQaIssueId(input: {
+  thesisId: string;
+  claimId: string | null;
+  normalizedNodeId: string | null;
+  category: AcademicQaIssueCategory;
+  triggeringCondition: string;
+}) {
+  return createHash('sha256')
+    .update(JSON.stringify(input))
+    .digest('hex')
+    .slice(0, 24);
+}
+
+function parseAcademicQaAssessedScope(value: string): AcademicQaRunPayload['assessedScope'] {
+  const parsed = parseJsonObject(value) ?? {};
+  const claimIds = Array.isArray(parsed.claimIds) ? parsed.claimIds.filter((item): item is string => typeof item === 'string') : [];
+  const normalizedNodeIds = Array.isArray(parsed.normalizedNodeIds)
+    ? parsed.normalizedNodeIds.filter((item): item is string => typeof item === 'string')
+    : [];
+  const counts = typeof parsed.counts === 'object' && parsed.counts !== null ? parsed.counts as Record<string, unknown> : {};
+
+  return {
+    claimIds,
+    normalizedNodeIds,
+    counts: {
+      claims: typeof counts.claims === 'number' ? counts.claims : claimIds.length,
+      sections: typeof counts.sections === 'number' ? counts.sections : normalizedNodeIds.length,
+    },
+  };
+}
+
+function parseAcademicQaSkippedScope(value: string): AcademicQaRunPayload['skippedScope'] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') {
+        return [];
+      }
+
+      const candidate = entry as Record<string, unknown>;
+      const entityType = candidate.entityType === 'section' ? 'section' : candidate.entityType === 'claim' ? 'claim' : null;
+      const entityId = typeof candidate.entityId === 'string' ? candidate.entityId : null;
+      const reason = typeof candidate.reason === 'string' ? candidate.reason : null;
+
+      return entityType && entityId && reason ? [{ entityType, entityId, reason }] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function parseAcademicQaSummary(
+  value: string,
+  assessedScope: AcademicQaRunPayload['assessedScope'],
+  skippedScope: AcademicQaRunPayload['skippedScope'],
+): AcademicQaRunPayload['summary'] {
+  const parsed = parseJsonObject(value) ?? {};
+  const findingsByCategory = typeof parsed.findingsByCategory === 'object' && parsed.findingsByCategory !== null
+    ? parsed.findingsByCategory as Record<string, unknown>
+    : {};
+
+  return {
+    findingsByCategory: {
+      'evidence-gap': typeof findingsByCategory['evidence-gap'] === 'number' ? findingsByCategory['evidence-gap'] : 0,
+      'citation-weakness': typeof findingsByCategory['citation-weakness'] === 'number' ? findingsByCategory['citation-weakness'] : 0,
+      methodology: typeof findingsByCategory.methodology === 'number' ? findingsByCategory.methodology : 0,
+      coherence: typeof findingsByCategory.coherence === 'number' ? findingsByCategory.coherence : 0,
+    },
+    assessedClaimCount: typeof parsed.assessedClaimCount === 'number' ? parsed.assessedClaimCount : assessedScope.counts.claims,
+    assessedSectionCount: typeof parsed.assessedSectionCount === 'number' ? parsed.assessedSectionCount : assessedScope.counts.sections,
+    skippedCount: typeof parsed.skippedCount === 'number' ? parsed.skippedCount : skippedScope.length,
+  };
+}
+
+function parseComplianceRuleResults(value: unknown): ComplianceRuleResultPayload[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== 'object') {
+      return [];
+    }
+
+    const candidate = entry as Partial<ComplianceRuleResultPayload>;
+    if (typeof candidate.ruleId !== 'string' || typeof candidate.title !== 'string' || typeof candidate.message !== 'string') {
+      return [];
+    }
+
+    return [{
+      ruleId: candidate.ruleId,
+      title: candidate.title,
+      category: candidate.category === 'metadata' ? 'metadata' : 'structure',
+      disposition: normalizePolicyRuleDisposition(typeof candidate.disposition === 'string' ? candidate.disposition : 'warning'),
+      severity: candidate.severity === 'warning' || candidate.severity === 'violation' ? candidate.severity : null,
+      issueId: typeof candidate.issueId === 'string' ? candidate.issueId : null,
+      normalizedNodeId: typeof candidate.normalizedNodeId === 'string' ? candidate.normalizedNodeId : null,
+      message: candidate.message,
+      remediation: typeof candidate.remediation === 'string' ? candidate.remediation : null,
+    } satisfies ComplianceRuleResultPayload];
+  });
+}
+
+function evaluatePolicyRules(input: {
+  thesisId: string;
+  policyProfile: PolicyProfilePayload;
+  sectionNodes: NormalizedNodePayload[];
+  degradedConfidence: boolean;
+}) {
+  const normalizedTitleMap = new Map(
+    input.sectionNodes
+      .filter((node) => typeof node.title === 'string' && node.title.trim().length > 0)
+      .map((node) => [slugify(node.title ?? ''), node]),
+  );
+
+  return input.policyProfile.rules.map((rule) => {
+    if (rule.category === 'metadata') {
+      if (input.degradedConfidence) {
+        return {
+          ruleId: rule.id,
+          title: rule.title,
+          category: rule.category,
+          disposition: 'skipped' as const,
+          severity: null,
+          issueId: null,
+          normalizedNodeId: null,
+          message: 'La regla se omitió porque la confianza estructural es insuficiente para evaluar metadatos agregados.',
+          remediation: rule.remediation,
+          issue: null,
+        };
+      }
+
+      const passes = input.sectionNodes.length >= (rule.minimumDocumentChildren ?? 0);
+      return {
+        ruleId: rule.id,
+        title: rule.title,
+        category: rule.category,
+        disposition: passes ? ('pass' as const) : ('warning' as const),
+        severity: passes ? null : 'warning',
+        issueId: passes ? null : createStableComplianceIssueId(input.thesisId, input.policyProfile.id, rule.id, null),
+        normalizedNodeId: null,
+        message: passes
+          ? 'La estructura visible cumple el mínimo de secciones requeridas.'
+          : 'La estructura visible no alcanza el mínimo de secciones requeridas.',
+        remediation: rule.remediation,
+        issue: passes
+          ? null
+          : buildComplianceIssueRecord({
+              thesisId: input.thesisId,
+              complianceRunId: '',
+              policyProfileId: input.policyProfile.id,
+              ruleId: rule.id,
+              normalizedNodeId: null,
+              severity: 'warning',
+              message: 'La estructura visible no alcanza el mínimo de secciones requeridas.',
+              remediation: rule.remediation,
+              disposition: 'warning',
+            }),
+      };
+    }
+
+    const matchingNode = rule.requiredSectionTitle
+      ? normalizedTitleMap.get(slugify(rule.requiredSectionTitle)) ?? null
+      : null;
+
+    if (matchingNode) {
+      return {
+        ruleId: rule.id,
+        title: rule.title,
+        category: rule.category,
+        disposition: 'pass' as const,
+        severity: null,
+        issueId: null,
+        normalizedNodeId: matchingNode.id,
+        message: `Se encontró la sección requerida ${rule.requiredSectionTitle}.`,
+        remediation: rule.remediation,
+        issue: null,
+      };
+    }
+
+    if (input.degradedConfidence) {
+      const issue = buildComplianceIssueRecord({
+        thesisId: input.thesisId,
+        complianceRunId: '',
+        policyProfileId: input.policyProfile.id,
+        ruleId: rule.id,
+        normalizedNodeId: null,
+        severity: 'warning',
+        message: `No se confirmó la sección requerida ${rule.requiredSectionTitle} debido a baja confianza estructural.`,
+        remediation: rule.remediation,
+        disposition: 'warning',
+      });
+
+      return {
+        ruleId: rule.id,
+        title: rule.title,
+        category: rule.category,
+        disposition: 'warning' as const,
+        severity: 'warning' as const,
+        issueId: issue.id,
+        normalizedNodeId: null,
+        message: issue.message,
+        remediation: issue.remediation,
+        issue,
+      };
+    }
+
+    const issue = buildComplianceIssueRecord({
+      thesisId: input.thesisId,
+      complianceRunId: '',
+      policyProfileId: input.policyProfile.id,
+      ruleId: rule.id,
+      normalizedNodeId: null,
+      severity: 'violation',
+      message: `Falta la sección requerida ${rule.requiredSectionTitle}.`,
+      remediation: rule.remediation,
+      disposition: 'violation',
+    });
+
+    return {
+      ruleId: rule.id,
+      title: rule.title,
+      category: rule.category,
+      disposition: 'violation' as const,
+      severity: 'violation' as const,
+      issueId: issue.id,
+      normalizedNodeId: null,
+      message: issue.message,
+      remediation: issue.remediation,
+      issue,
+    };
+  }).map((result) => ({
+    ...result,
+    issue: result.issue
+      ? { ...result.issue, complianceRunId: result.issue.complianceRunId }
+      : null,
+  }));
+}
+
+function createStableComplianceIssueId(
+  thesisId: string,
+  policyProfileId: string,
+  ruleId: string,
+  normalizedNodeId: string | null,
+) {
+  return createHash('sha256')
+    .update([thesisId, policyProfileId, ruleId, normalizedNodeId ?? 'none'].join('::'))
+    .digest('hex')
+    .slice(0, 24);
+}
+
+function buildComplianceIssueRecord(input: {
+  thesisId: string;
+  complianceRunId: string;
+  policyProfileId: string;
+  ruleId: string;
+  normalizedNodeId: string | null;
+  severity: 'warning' | 'violation';
+  message: string;
+  remediation: string;
+  disposition: 'warning' | 'violation';
+}): typeof complianceIssues.$inferInsert {
+  const timestamp = new Date().toISOString();
+  return {
+    id: createStableComplianceIssueId(input.thesisId, input.policyProfileId, input.ruleId, input.normalizedNodeId),
+    thesisId: input.thesisId,
+    complianceRunId: input.complianceRunId,
+    policyProfileId: input.policyProfileId,
+    ruleId: input.ruleId,
+    normalizedNodeId: input.normalizedNodeId,
+    severity: input.severity,
+    message: input.message,
+    remediation: input.remediation,
+    disposition: input.disposition,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
 }
 
 function buildIntakeRecommendations(input: {

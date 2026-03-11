@@ -2157,6 +2157,517 @@ describe('thesis lifecycle registry routes', () => {
     );
   });
 
+  it('loads one active policy profile and persists deterministic compliance runs with rule-level dispositions and stable issue IDs', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'policy-compliance-violation-'));
+    const latexDir = path.join(fixtureRoot, 'latex-project');
+    fs.mkdirSync(latexDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'main.tex'),
+      String.raw`\documentclass{report}
+\begin{document}
+\chapter{Introducción}
+Contexto general.
+
+\chapter{Metodología}
+Descripción del método.
+
+\end{document}
+`,
+      'utf8',
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis con incumplimientos de política',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: {
+        importRootPath: latexDir,
+      },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const profileResponse = await app.inject({
+      method: 'GET',
+      url: '/policy-profiles/active',
+    });
+
+    expect(profileResponse.statusCode).toBe(200);
+    const profilePayload = profileResponse.json() as {
+      ok: boolean;
+      policyProfile: {
+        id: string;
+        institutionId: string;
+        institution: string;
+        faculty: string;
+        version: string;
+        requiredSections: string[];
+        rules: Array<{ id: string; disposition: string; title: string }>;
+      };
+    };
+
+    expect(profilePayload.ok).toBe(true);
+    expect(profilePayload.policyProfile).toMatchObject({
+      institutionId: 'universidad-demo::ingenieria',
+      institution: 'Universidad Demo',
+      faculty: 'Ingeniería',
+      version: '2026.1',
+    });
+    expect(profilePayload.policyProfile.requiredSections).toEqual([
+      'Introducción',
+      'Metodología',
+      'Resultados',
+      'Conclusiones',
+    ]);
+    expect(profilePayload.policyProfile.rules.map((rule) => rule.id)).toEqual([
+      'structure.required-introduction',
+      'structure.required-methodology',
+      'structure.required-results',
+      'structure.required-conclusions',
+      'metadata.min-section-count',
+    ]);
+
+    const runResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/compliance-runs`,
+    });
+
+    expect(runResponse.statusCode).toBe(201);
+    const runPayload = runResponse.json() as {
+      ok: boolean;
+      complianceRun: {
+        id: string;
+        thesisId: string;
+        policyProfileId: string;
+        policyProfileVersion: string;
+        status: string;
+        counts: {
+          evaluated: number;
+          warnings: number;
+          skipped: number;
+          violations: number;
+        };
+        ruleResults: Array<{
+          ruleId: string;
+          disposition: 'pass' | 'violation' | 'warning' | 'skipped';
+          issueId: string | null;
+          severity: string | null;
+        }>;
+        issues: Array<{
+          id: string;
+          ruleId: string;
+          policyProfileId: string;
+          normalizedNodeId: string | null;
+          severity: string;
+          remediation: string | null;
+        }>;
+      };
+    };
+
+    expect(runPayload.ok).toBe(true);
+    expect(runPayload.complianceRun.thesisId).toBe(thesisId);
+    expect(runPayload.complianceRun.policyProfileId).toBe(profilePayload.policyProfile.id);
+    expect(runPayload.complianceRun.policyProfileVersion).toBe('2026.1');
+    expect(runPayload.complianceRun.status).toBe('completed');
+    expect(runPayload.complianceRun.counts).toEqual({
+      evaluated: 5,
+      warnings: 0,
+      skipped: 0,
+      violations: 2,
+    });
+    expect(runPayload.complianceRun.ruleResults).toEqual([
+      expect.objectContaining({ ruleId: 'structure.required-introduction', disposition: 'pass', issueId: null }),
+      expect.objectContaining({ ruleId: 'structure.required-methodology', disposition: 'pass', issueId: null }),
+      expect.objectContaining({ ruleId: 'structure.required-results', disposition: 'violation', severity: 'violation' }),
+      expect.objectContaining({ ruleId: 'structure.required-conclusions', disposition: 'violation', severity: 'violation' }),
+      expect.objectContaining({ ruleId: 'metadata.min-section-count', disposition: 'pass', issueId: null }),
+    ]);
+    expect(runPayload.complianceRun.issues).toHaveLength(2);
+    expect(runPayload.complianceRun.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          policyProfileId: profilePayload.policyProfile.id,
+          ruleId: 'structure.required-results',
+          severity: 'violation',
+        }),
+        expect.objectContaining({
+          policyProfileId: profilePayload.policyProfile.id,
+          ruleId: 'structure.required-conclusions',
+          severity: 'violation',
+        }),
+      ]),
+    );
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/compliance-runs`,
+    });
+
+    expect(listResponse.statusCode).toBe(200);
+    const listPayload = listResponse.json() as {
+      complianceRuns: Array<{
+        id: string;
+        counts: { evaluated: number; warnings: number; skipped: number; violations: number };
+        issues: Array<{ id: string }>;
+      }>;
+    };
+
+    expect(listPayload.complianceRuns).toHaveLength(1);
+    expect(listPayload.complianceRuns[0]?.id).toBe(runPayload.complianceRun.id);
+    expect(listPayload.complianceRuns[0]?.counts.violations).toBe(2);
+    expect(listPayload.complianceRuns[0]?.issues.map((issue) => issue.id)).toEqual(
+      runPayload.complianceRun.issues.map((issue) => issue.id),
+    );
+
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  });
+
+  it('downgrades structure-dependent rules to warnings and skips metadata rules when structure confidence is low', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'policy-compliance-warning-'));
+    const pdfPath = path.join(fixtureRoot, 'outline.pdf');
+    fs.mkdirSync(fixtureRoot, { recursive: true });
+    fs.writeFileSync(
+      pdfPath,
+      Buffer.from('%PDF-1.4\ntexto sin encabezados claros\n%%EOF', 'utf8'),
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis con estructura degradada',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: {
+        importRootPath: pdfPath,
+      },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const runResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/compliance-runs`,
+    });
+
+    expect(runResponse.statusCode).toBe(201);
+    const payload = runResponse.json() as {
+      complianceRun: {
+        status: string;
+        summary: {
+          degradedConfidence: boolean;
+          warnings: string[];
+        };
+        counts: {
+          evaluated: number;
+          warnings: number;
+          skipped: number;
+          violations: number;
+        };
+        ruleResults: Array<{
+          ruleId: string;
+          disposition: 'pass' | 'violation' | 'warning' | 'skipped';
+          issueId: string | null;
+        }>;
+        issues: Array<{
+          id: string;
+          ruleId: string;
+          severity: string;
+          disposition: string;
+        }>;
+      };
+    };
+
+    expect(payload.complianceRun.status).toBe('completed_with_warnings');
+    expect(payload.complianceRun.summary.degradedConfidence).toBe(true);
+    expect(payload.complianceRun.summary.warnings[0]).toMatch(/confianza de estructura/i);
+    expect(payload.complianceRun.counts).toEqual({
+      evaluated: 4,
+      warnings: 4,
+      skipped: 1,
+      violations: 0,
+    });
+    expect(payload.complianceRun.ruleResults).toEqual([
+      expect.objectContaining({ ruleId: 'structure.required-introduction', disposition: 'warning' }),
+      expect.objectContaining({ ruleId: 'structure.required-methodology', disposition: 'warning' }),
+      expect.objectContaining({ ruleId: 'structure.required-results', disposition: 'warning' }),
+      expect.objectContaining({ ruleId: 'structure.required-conclusions', disposition: 'warning' }),
+      expect.objectContaining({ ruleId: 'metadata.min-section-count', disposition: 'skipped' }),
+    ]);
+    expect(payload.complianceRun.issues).toHaveLength(4);
+    expect(payload.complianceRun.issues.every((issue) => issue.severity === 'warning')).toBe(true);
+    expect(payload.complianceRun.issues.every((issue) => issue.disposition === 'warning')).toBe(true);
+
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  });
+
+  it('runs academic QA with separate evidence, citation, methodology, and coherence issues plus assessed and skipped scope reporting', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'academic-qa-analysis-'));
+    const latexDir = path.join(fixtureRoot, 'latex-project');
+    fs.mkdirSync(path.join(latexDir, 'sections'), { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'main.tex'),
+      String.raw`\documentclass{report}
+\begin{document}
+\chapter{Introducción}
+Marco general.
+
+\chapter{Metodología}
+\section{Metodología}
+Diseño del estudio.
+
+\chapter{Resultados}
+\section{Resultados}
+Hallazgos principales.
+\end{document}
+`,
+      'utf8',
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis con QA académico',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const setupResponse = await app.inject({ method: 'GET', url: `/theses/${thesisId}/evidence-context-setup` });
+    expect(setupResponse.statusCode).toBe(200);
+    const setup = (setupResponse.json() as {
+      setup: {
+        normalizedNodes: Array<{ id: string; title: string | null; nodeType: string }>;
+      };
+    }).setup;
+    const methodologyNode = setup.normalizedNodes.find((node) => node.title?.includes('Metodología') && node.nodeType === 'section');
+    const resultsNode = setup.normalizedNodes.find((node) => node.title?.includes('Resultados') && node.nodeType === 'section');
+    expect(methodologyNode).toBeTruthy();
+    expect(resultsNode).toBeTruthy();
+
+    const sourceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/sources`,
+      payload: {
+        sourceType: 'article',
+        title: 'Fuente única para claims',
+        authors: ['Ana Evidencia'],
+        publicationYear: 2024,
+      },
+    });
+    expect(sourceResponse.statusCode).toBe(201);
+    const sourceId = (sourceResponse.json() as { source: { id: string } }).source.id;
+
+    const evidenceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/evidence-fragments`,
+      payload: {
+        sourceId,
+        normalizedNodeId: resultsNode?.id,
+        snippet: 'El experimento mostró mejoras del 10%.',
+        extractionMethod: 'manual',
+        locator: 'p. 12',
+      },
+    });
+    expect(evidenceResponse.statusCode).toBe(201);
+    const evidenceId = (evidenceResponse.json() as { evidenceFragment: { id: string } }).evidenceFragment.id;
+
+    const unsupportedClaimResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/claims`,
+      payload: {
+        text: 'La hipótesis principal está demostrada.',
+        normalizedNodeId: methodologyNode?.id,
+      },
+    });
+    expect(unsupportedClaimResponse.statusCode).toBe(201);
+    const unsupportedClaimId = (unsupportedClaimResponse.json() as { claim: { id: string } }).claim.id;
+
+    const weakCitationClaimResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/claims`,
+      payload: {
+        text: 'Los resultados son consistentes con la literatura previa.',
+        normalizedNodeId: resultsNode?.id,
+      },
+    });
+    expect(weakCitationClaimResponse.statusCode).toBe(201);
+    const weakCitationClaimId = (weakCitationClaimResponse.json() as { claim: { id: string } }).claim.id;
+
+    const skippedClaimResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/claims`,
+      payload: {
+        text: 'Claim sin sección enlazada.',
+      },
+    });
+    expect(skippedClaimResponse.statusCode).toBe(201);
+    const skippedClaimId = (skippedClaimResponse.json() as { claim: { id: string } }).claim.id;
+
+    const linkResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/claims/${weakCitationClaimId}/evidence-links`,
+      payload: {
+        evidenceFragmentIds: [evidenceId],
+        rationale: 'La evidencia respalda el resultado reportado.',
+      },
+    });
+    expect(linkResponse.statusCode).toBe(200);
+
+    const qaResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/academic-qa-runs`,
+    });
+    expect(qaResponse.statusCode).toBe(201);
+
+    const qaPayload = qaResponse.json() as {
+      ok: boolean;
+      academicQaRun: {
+        id: string;
+        thesisId: string;
+        status: string;
+        issueCategories: string[];
+        assessedScope: {
+          claimIds: string[];
+          normalizedNodeIds: string[];
+          counts: { claims: number; sections: number };
+        };
+        skippedScope: Array<{ entityType: string; entityId: string; reason: string }>;
+        summary: {
+          findingsByCategory: Record<string, number>;
+          assessedClaimCount: number;
+          assessedSectionCount: number;
+          skippedCount: number;
+        };
+        issues: Array<{
+          id: string;
+          category: string;
+          claimId: string | null;
+          normalizedNodeId: string | null;
+          triggeringCondition: string;
+          rationale: string;
+          remediation: string | null;
+          groundedIn: { entityType: string; entityId: string };
+        }>;
+      };
+    };
+
+    expect(qaPayload.ok).toBe(true);
+    expect(qaPayload.academicQaRun.thesisId).toBe(thesisId);
+    expect(qaPayload.academicQaRun.status).toBe('completed');
+    expect(qaPayload.academicQaRun.issueCategories).toEqual([
+      'citation-weakness',
+      'coherence',
+      'evidence-gap',
+      'methodology',
+    ]);
+    expect(qaPayload.academicQaRun.assessedScope.claimIds).toEqual(expect.arrayContaining([unsupportedClaimId, weakCitationClaimId]));
+    expect(qaPayload.academicQaRun.assessedScope.normalizedNodeIds).toEqual(expect.arrayContaining([methodologyNode!.id, resultsNode!.id]));
+    expect(qaPayload.academicQaRun.skippedScope).toEqual([
+      expect.objectContaining({ entityType: 'claim', entityId: skippedClaimId, reason: 'Claim is not linked to a thesis section.' }),
+    ]);
+    expect(qaPayload.academicQaRun.summary).toEqual({
+      findingsByCategory: {
+        'evidence-gap': 1,
+        'citation-weakness': 1,
+        methodology: 1,
+        coherence: 1,
+      },
+      assessedClaimCount: 2,
+      assessedSectionCount: expect.any(Number),
+      skippedCount: 1,
+    });
+    expect(qaPayload.academicQaRun.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        category: 'evidence-gap',
+        claimId: unsupportedClaimId,
+        normalizedNodeId: methodologyNode!.id,
+        triggeringCondition: 'zero-evidence',
+        groundedIn: { entityType: 'claim', entityId: unsupportedClaimId },
+      }),
+      expect.objectContaining({
+        category: 'citation-weakness',
+        claimId: weakCitationClaimId,
+        normalizedNodeId: resultsNode!.id,
+        triggeringCondition: 'weak-citation-support',
+        groundedIn: { entityType: 'claim', entityId: weakCitationClaimId },
+      }),
+      expect.objectContaining({
+        category: 'methodology',
+        claimId: null,
+        normalizedNodeId: methodologyNode!.id,
+        triggeringCondition: 'methodology-no-support',
+        rationale: expect.stringMatching(/metodolog/i),
+        remediation: expect.stringMatching(/evidencia/i),
+        groundedIn: { entityType: 'section', entityId: methodologyNode!.id },
+      }),
+      expect.objectContaining({
+        category: 'coherence',
+        claimId: null,
+        normalizedNodeId: resultsNode!.id,
+        triggeringCondition: 'missing-bibliography-linkage',
+        rationale: expect.stringMatching(/coherencia|marco/i),
+        remediation: expect.stringMatching(/Zotero|evidencia/i),
+        groundedIn: { entityType: 'section', entityId: resultsNode!.id },
+      }),
+    ]));
+
+    const qaListResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/academic-qa-runs`,
+    });
+    expect(qaListResponse.statusCode).toBe(200);
+    const qaListPayload = qaListResponse.json() as {
+      academicQaRuns: Array<{
+        id: string;
+        issueCategories: string[];
+        skippedScope: Array<{ entityId: string }>;
+        issues: Array<{ category: string; groundedIn: { entityId: string } }>;
+      }>;
+    };
+    expect(qaListPayload.academicQaRuns).toHaveLength(1);
+    expect(qaListPayload.academicQaRuns[0]).toEqual(expect.objectContaining({
+      id: qaPayload.academicQaRun.id,
+      issueCategories: qaPayload.academicQaRun.issueCategories,
+    }));
+    expect(qaListPayload.academicQaRuns[0]?.skippedScope).toEqual([
+      expect.objectContaining({ entityId: skippedClaimId }),
+    ]);
+
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+  });
+
   it('initializes resumable create state and makes successful imports the active workspace for continuation flows', async () => {
     const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'intake-active-workspace-'));
     const latexDir = path.join(fixtureRoot, 'latex-project');
