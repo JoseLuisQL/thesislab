@@ -1,10 +1,11 @@
 import Fastify from 'fastify';
 import os from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs';
 import { z } from 'zod';
 
 import { buildHealthPayload } from '@thesis-research-os/shared';
-import { createDatabaseConnection, getMigrationsDirectory } from '@thesis-research-os/db';
+import { runMigrations } from '@thesis-research-os/db/migrator';
 
 import { buildLocalFirstStatusPayload } from './status.js';
 import {
@@ -131,10 +132,12 @@ const latexBuildSchema = z.object({
   createdBy: z.string().trim().min(1),
 });
 
+function resolveRuntimeDatabaseUrl() {
+  return process.env.DATABASE_URL?.trim() || 'file:./data/thesis-research-os.sqlite';
+}
+
 export function createApp() {
-  const testDatabaseUrl = process.env.VITEST
-    ? `file:${path.join(os.tmpdir(), `thesis-api-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.sqlite`)}`
-    : process.env.DATABASE_URL;
+  const testDatabaseUrl = resolveRuntimeDatabaseUrl();
   const app = Fastify({ logger: true });
   let schemaReady: Promise<void> | null = null;
   let thesisLifecycle: ReturnType<typeof createThesisLifecycleService> | null = null;
@@ -588,23 +591,5 @@ export function createApp() {
 }
 
 async function ensureDatabaseSchema(databaseUrl?: string) {
-  const connection = createDatabaseConnection(databaseUrl);
-
-  try {
-    const existingTables = await connection.sqlite.execute({
-      sql: "SELECT name FROM sqlite_master WHERE type = ? AND name NOT LIKE ? LIMIT 1",
-      args: ['table', 'sqlite_%'],
-    });
-
-    if (existingTables.rows.length > 0) {
-      return;
-    }
-
-    const migrationSql = await import('node:fs/promises').then((fs) =>
-      fs.readFile(`${getMigrationsDirectory()}/0000_domain_core.sql`, 'utf8'),
-    );
-    await connection.sqlite.executeMultiple(migrationSql);
-  } finally {
-    connection.sqlite.close();
-  }
+  await runMigrations(databaseUrl);
 }
