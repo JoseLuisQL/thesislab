@@ -3113,17 +3113,25 @@ function runContainerizedLatexBuild(input: {
     ? process.env.HOST_REPO_ROOT
     : findRepoRoot(process.cwd()) ?? process.cwd();
   const mountedBuildRoot = resolveLatexBuildMountedRoot(buildRoot, repoRoot);
-  const docToolResult = spawnSync(path.join(repoRoot, '.factory', 'bin', 'doc-tool.sh'), ['latex-build'], {
-    cwd: repoRoot,
-    encoding: 'utf8',
-    env: {
-      ...process.env,
-      DOCKER_API_VERSION: process.env.DOCKER_API_VERSION ?? '1.44',
-      LATEX_BUILD_ROOT: mountedBuildRoot,
-      LATEX_BUILD_COMMAND: latexCommand,
-      PATH: `${process.env.PATH ?? ''}:/usr/bin:/usr/local/bin:/bin`,
-    },
-  }) as { status: number | null; stdout: string; stderr: string; error?: Error };
+  const shouldRunDocTool = input.bibliography.status === 'ready' || input.bibliography.status === 'not_required';
+  const docToolResult = shouldRunDocTool
+    ? (spawnSync(path.join(repoRoot, '.factory', 'bin', 'doc-tool.sh'), ['latex-build'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          DOCKER_API_VERSION: process.env.DOCKER_API_VERSION ?? '1.44',
+          LATEX_BUILD_ROOT: mountedBuildRoot,
+          LATEX_BUILD_COMMAND: latexCommand,
+          PATH: `${process.env.PATH ?? ''}:/usr/bin:/usr/local/bin:/bin`,
+        },
+      }) as { status: number | null; stdout: string; stderr: string; error?: Error })
+    : {
+        status: 0,
+        stdout: '',
+        stderr: '',
+        error: undefined,
+      };
 
   const logLines = [
     `Containerized LaTeX build executed for ${input.entrypoint}.`,
@@ -3131,6 +3139,10 @@ function runContainerizedLatexBuild(input: {
     `Bibliography status: ${input.bibliography.status}.`,
     `Working directory: ${path.relative(input.importRootPath, buildRoot) || '.'}.`,
   ];
+
+  if (!shouldRunDocTool) {
+    logLines.push('Containerized LaTeX build skipped because bibliography preflight already determined the workflow cannot complete successfully.');
+  }
 
   if (docToolResult.error) {
     logLines.push(`spawn-error: ${docToolResult.error.message}`);
