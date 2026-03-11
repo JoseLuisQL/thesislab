@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import zlib from 'node:zlib';
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1439,7 +1440,27 @@ describe('thesis lifecycle registry routes', () => {
         report: {
           detectedFormat: string;
           terminalStatus: string;
-          structureSummary: { entrypoint: string | null; items: string[] } | null;
+          structureSummary: {
+            entrypoint: string | null;
+            items: string[];
+            selection: { mode: string; reason: string; candidates: string[] };
+            includeGraph: {
+              rootFile: string | null;
+              filesInOrder: string[];
+              edges: Array<{ from: string; to: string; command: string; line: number }>;
+              unresolved: unknown[];
+              blocked: unknown[];
+              cycles: unknown[];
+            } | null;
+            outline: Array<{
+              id: string;
+              title: string | null;
+              level: number;
+              nodeType: string;
+              sourcePath: string | null;
+              anchor: { start: string | null; end: string | null };
+            }>;
+          } | null;
           normalizationSummary: { nodeCount: number; provenanceCoverage: { available: number; unavailable: number } } | null;
         };
       };
@@ -1481,6 +1502,22 @@ describe('thesis lifecycle registry routes', () => {
       structureSummary: {
         entrypoint: 'main.tex',
         items: ['main.tex', 'chapter1.tex', 'sections/methodology.tex'],
+        selection: {
+          mode: 'deterministic',
+          reason: 'A single root candidate containing a document preamble was found.',
+          candidates: ['main.tex'],
+        },
+        includeGraph: {
+          rootFile: 'main.tex',
+          filesInOrder: ['main.tex', 'chapter1.tex', 'sections/methodology.tex'],
+          edges: [
+            { from: 'main.tex', to: 'chapter1.tex', command: 'input', line: 3 },
+            { from: 'chapter1.tex', to: 'sections/methodology.tex', command: 'input', line: 4 },
+          ],
+          unresolved: [],
+          blocked: [],
+          cycles: [],
+        },
       },
       normalizationSummary: {
         nodeCount: 5,
@@ -1567,6 +1604,36 @@ describe('thesis lifecycle registry routes', () => {
       provenanceKind: 'latex',
       provenance: { kind: 'latex', filePath: 'chapter1.tex', lineStart: 1, lineEnd: 1 },
     });
+    expect(latexJob.intakeJob.report.structureSummary?.outline).toMatchObject([
+      {
+        title: 'Introduccion',
+        level: 1,
+        nodeType: 'chapter',
+        sourcePath: 'chapter1.tex',
+        anchor: { start: '1', end: '1' },
+      },
+      {
+        title: 'Marco teorico',
+        level: 2,
+        nodeType: 'section',
+        sourcePath: 'chapter1.tex',
+        anchor: { start: '2', end: '2' },
+      },
+      {
+        title: 'Metodologia',
+        level: 2,
+        nodeType: 'section',
+        sourcePath: 'sections/methodology.tex',
+        anchor: { start: '1', end: '1' },
+      },
+      {
+        title: 'Datos',
+        level: 3,
+        nodeType: 'subsection',
+        sourcePath: 'sections/methodology.tex',
+        anchor: { start: '2', end: '2' },
+      },
+    ]);
 
     const nodesRepeatResponse = await app.inject({
       method: 'GET',
@@ -1649,6 +1716,9 @@ describe('thesis lifecycle registry routes', () => {
 
     const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
 
+    expect(fs.existsSync(path.resolve('imports/latex-project'))).toBe(false);
+    expect(fs.existsSync(path.resolve(fixtureRoot, 'imports/latex-project'))).toBe(true);
+
     const intakeResponse = await app.inject({
       method: 'POST',
       url: `/theses/${thesisId}/intake-jobs`,
@@ -1671,6 +1741,180 @@ describe('thesis lifecycle registry routes', () => {
     expect(payload.intakeJob.importRootPath).toBe(latexDir);
     expect(payload.intakeJob.report?.terminalStatus).toBe('succeeded');
     expect(payload.intakeJob.report?.failures).toEqual([]);
+  });
+
+  it('accepts external absolute intake roots when the stored workspace path is an unavailable host mount path', async () => {
+    const hostWorkspaceRoot = path.join('/tmp', `host-workspace-${randomUUID()}`);
+    const externalWorkspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'latex-external-live-'));
+    const latexDir = path.join(externalWorkspaceRoot, 'latex-project');
+    fs.mkdirSync(latexDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'main.tex'),
+      '\\documentclass{report}\n\\begin{document}\n\\chapter{Workspace externo}\\n\\section{Ruta /tmp}\\n\\end{document}\n',
+      'utf8',
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis workspace externo',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: hostWorkspaceRoot,
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const intakePayload = intakeResponse.json() as {
+      intakeJob: {
+        status: string;
+        importRootPath: string;
+        report: {
+          terminalStatus: string;
+          failures: Array<{ code: string }>;
+          structureSummary: {
+            entrypoint: string | null;
+          } | null;
+        } | null;
+      };
+    };
+
+    expect(intakePayload.intakeJob.status).toBe('succeeded');
+    expect(intakePayload.intakeJob.importRootPath).toBe(latexDir);
+    expect(intakePayload.intakeJob.report).toMatchObject({
+      terminalStatus: 'succeeded',
+      failures: [],
+      structureSummary: {
+        entrypoint: 'main.tex',
+      },
+    });
+  });
+
+  it('accepts host /tmp intake roots on the manifest-started container boundary', async () => {
+    const hostTmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'latex-host-tmp-mounted-'));
+    const latexDir = path.join(hostTmpRoot, 'latex-project');
+    const missingWorkspacePath = path.join(hostTmpRoot, 'missing', 'workspace-root');
+    fs.mkdirSync(latexDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'main.tex'),
+      '\\documentclass{report}\n\\begin{document}\n\\chapter{Tmp montado}\n\\section{Host /tmp visible}\n\\end{document}\n',
+      'utf8',
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis host tmp montado',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: missingWorkspacePath,
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const intakePayload = intakeResponse.json() as {
+      intakeJob: {
+        status: string;
+        importRootPath: string;
+        report: {
+          terminalStatus: string;
+          failures: Array<{ code: string }>;
+          structureSummary: {
+            entrypoint: string | null;
+          } | null;
+        } | null;
+      };
+    };
+
+    expect(intakePayload.intakeJob.status).toBe('succeeded');
+    expect(intakePayload.intakeJob.importRootPath).toBe(latexDir);
+    expect(intakePayload.intakeJob.report).toMatchObject({
+      terminalStatus: 'succeeded',
+      failures: [],
+      structureSummary: {
+        entrypoint: 'main.tex',
+      },
+    });
+  });
+
+  it('accepts external absolute intake roots when the stored workspace path points to a missing nested path under the external workspace', async () => {
+    const externalWorkspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'latex-external-missing-workspace-'));
+    const latexDir = path.join(externalWorkspaceRoot, 'latex-project');
+    const missingWorkspacePath = path.join(externalWorkspaceRoot, 'missing', 'workspace-root');
+    fs.mkdirSync(latexDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'main.tex'),
+      '\\documentclass{report}\n\\begin{document}\n\\chapter{Fallback absoluto}\n\\section{Workspace ausente}\n\\end{document}\n',
+      'utf8',
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis fallback workspace ausente',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: missingWorkspacePath,
+      },
+    });
+
+    expect(createResponse.statusCode).toBe(201);
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const intakePayload = intakeResponse.json() as {
+      intakeJob: {
+        status: string;
+        importRootPath: string;
+        report: {
+          terminalStatus: string;
+          failures: Array<{ code: string }>;
+          structureSummary: {
+            entrypoint: string | null;
+          } | null;
+        } | null;
+      };
+    };
+
+    expect(intakePayload.intakeJob.status).toBe('succeeded');
+    expect(intakePayload.intakeJob.importRootPath).toBe(latexDir);
+    expect(intakePayload.intakeJob.report).toMatchObject({
+      terminalStatus: 'succeeded',
+      failures: [],
+      structureSummary: {
+        entrypoint: 'main.tex',
+      },
+    });
   });
 
   it('blocks LaTeX intake that escapes the thesis workspace boundary through include roots or symlinks', async () => {
@@ -1740,6 +1984,164 @@ describe('thesis lifecycle registry routes', () => {
       code: 'INTAKE_BOUNDARY_VIOLATION',
       thesisId,
     }));
+  });
+
+  it('reports ambiguous LaTeX roots deterministically without fabricating a canonical entrypoint', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'latex-ambiguous-root-'));
+    const latexDir = path.join(fixtureRoot, 'latex-project');
+    fs.mkdirSync(latexDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'alpha.tex'),
+      '\\documentclass{report}\n\\begin{document}\n\\chapter{Alpha}\n\\end{document}\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(latexDir, 'beta.tex'),
+      '\\documentclass{report}\n\\begin{document}\n\\chapter{Beta}\n\\end{document}\n',
+      'utf8',
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis latex ambigua',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+    const intakePayload = intakeResponse.json() as {
+      intakeJob: {
+        status: string;
+        detectedEntrypoint: string | null;
+        report: {
+          terminalStatus: string;
+          structureSummary: {
+            entrypoint: string | null;
+            selection: { mode: string; candidates: string[]; reason: string };
+            includeGraph: unknown;
+            outline: unknown[];
+          } | null;
+          failures: Array<{ code: string; message: string }>;
+        } | null;
+      };
+    };
+
+    expect(intakePayload.intakeJob.status).toBe('failed');
+    expect(intakePayload.intakeJob.detectedEntrypoint).toBeNull();
+    expect(intakePayload.intakeJob.report?.terminalStatus).toBe('failed');
+    expect(intakePayload.intakeJob.report?.structureSummary).toMatchObject({
+      entrypoint: null,
+      selection: {
+        mode: 'ambiguous',
+        candidates: ['alpha.tex', 'beta.tex'],
+      },
+      includeGraph: null,
+      outline: [],
+    });
+    expect(intakePayload.intakeJob.report?.failures).toContainEqual(
+      expect.objectContaining({
+        code: 'LATEX_ENTRYPOINT_NOT_FOUND',
+        message: expect.stringContaining('deterministic'),
+      }),
+    );
+  });
+
+  it('reports unresolved includes and cycle-safe include traversal in the LaTeX structure summary', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'latex-graph-'));
+    const latexDir = path.join(fixtureRoot, 'latex-project');
+    fs.mkdirSync(path.join(latexDir, 'sections'), { recursive: true });
+    fs.writeFileSync(
+      path.join(latexDir, 'main.tex'),
+      '\\documentclass{report}\n\\begin{document}\n\\input{sections/intro}\n\\input{missing-section}\n\\end{document}\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(latexDir, 'sections', 'intro.tex'),
+      '\\chapter{Intro}\n\\input{loop}\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(latexDir, 'sections', 'loop.tex'),
+      '\\section{Loop}\n\\input{intro}\n',
+      'utf8',
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis latex grafo',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+    const intakePayload = intakeResponse.json() as {
+      intakeJob: {
+        status: string;
+        report: {
+          terminalStatus: string;
+          warnings: string[];
+          structureSummary: {
+            includeGraph: {
+              filesInOrder: string[];
+              edges: Array<{ from: string; to: string; command: string; line: number }>;
+              unresolved: Array<{ from: string; target: string; command: string; line: number; reason: string }>;
+              blocked: unknown[];
+              cycles: Array<{ path: string[] }>;
+            } | null;
+            outline: Array<{ title: string | null; level: number; sourcePath: string | null }>;
+          } | null;
+        } | null;
+      };
+    };
+
+    expect(intakePayload.intakeJob.status).toBe('succeeded');
+    expect(intakePayload.intakeJob.report?.terminalStatus).toBe('succeeded');
+    expect(intakePayload.intakeJob.report?.warnings).toContain(
+      'Unresolved LaTeX include missing-section.tex from main.tex:4.',
+    );
+    expect(intakePayload.intakeJob.report?.warnings.some((warning) => warning.includes('Cycle-safe traversal skipped recursive include'))).toBe(true);
+    expect(intakePayload.intakeJob.report?.structureSummary?.includeGraph).toEqual({
+      rootFile: 'main.tex',
+      filesInOrder: ['main.tex', 'sections/intro.tex', 'sections/loop.tex'],
+      edges: [
+        { from: 'main.tex', to: 'sections/intro.tex', command: 'input', line: 3 },
+        { from: 'sections/intro.tex', to: 'sections/loop.tex', command: 'input', line: 2 },
+        { from: 'sections/loop.tex', to: 'sections/intro.tex', command: 'input', line: 2 },
+      ],
+      unresolved: [
+        { from: 'main.tex', target: 'missing-section', command: 'input', line: 4, reason: 'missing_target' },
+      ],
+      blocked: [],
+      cycles: [
+        { path: ['main.tex', 'sections/intro.tex', 'sections/loop.tex', 'sections/intro.tex'] },
+      ],
+    });
+    expect(intakePayload.intakeJob.report?.structureSummary?.outline).toEqual([
+      expect.objectContaining({ title: 'Intro', level: 1, sourcePath: 'sections/intro.tex' }),
+      expect.objectContaining({ title: 'Loop', level: 2, sourcePath: 'sections/loop.tex' }),
+    ]);
   });
 
   it('fails unsupported or corrupt imports explicitly without persisting a fake successful model', async () => {

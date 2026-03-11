@@ -35,6 +35,7 @@ case "$MODE" in
       --name "$NAME" \
       -p "${PORT}:${PORT}" \
       -v "$ROOT:$WORKDIR" \
+      -v "/tmp:/tmp" \
       -w "$WORKDIR" \
       -e "$ENV_NAME=$PORT" \
       -e "HOST_REPO_ROOT=$HOST_REPO_ROOT_VALUE" \
