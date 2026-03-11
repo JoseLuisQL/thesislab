@@ -10,6 +10,7 @@ import { getDatabaseFilePath, runMigrations } from '@thesis-research-os/db';
 import { buildLocalFirstStatusPayload } from './status.js';
 import {
   type CreateWorkflowTaskInput,
+  type CreateWorkflowPackInput,
   type CreateCheckpointInput,
   type CreateClaimInput,
   type CreateWorkflowTaskCheckpointInput,
@@ -36,6 +37,8 @@ import {
   type LinkClaimEvidenceInput,
   SourceRegistrationConflictError,
   ThesisNotFoundError,
+  type UpdateWorkflowPackInput,
+  WorkflowPackNotFoundError,
   WorkflowTaskNotFoundError,
   ZoteroMappingNotFoundError,
   createThesisLifecycleService,
@@ -99,6 +102,33 @@ const createWorkflowTaskCheckpointSchema = z.object({
   blocker: z.string().trim().min(1).nullable().optional(),
   checkpointedAt: z.string().datetime().optional(),
 });
+
+const workflowStepStatusSchema = z.enum(['pending', 'in_progress', 'blocked', 'completed']);
+
+const createWorkflowPackSchema = z.object({
+  name: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  status: workflowStepStatusSchema.optional(),
+  currentStepId: z.string().trim().min(1).nullable().optional(),
+  steps: z.array(z.object({
+    title: z.string().trim().min(1),
+    description: z.string().trim().min(1),
+    status: workflowStepStatusSchema.optional(),
+    stepOrder: z.number().int().optional(),
+  })).min(1),
+});
+
+const updateWorkflowPackSchema = z.object({
+  status: workflowStepStatusSchema.optional(),
+  currentStepId: z.string().trim().min(1).nullable().optional(),
+  steps: z.array(z.object({
+    id: z.string().trim().min(1),
+    status: workflowStepStatusSchema.optional(),
+    title: z.string().trim().min(1).optional(),
+    description: z.string().trim().min(1).optional(),
+    stepOrder: z.number().int().optional(),
+  })).optional(),
+}).refine((payload) => Object.keys(payload).length > 0, 'At least one field must be provided.');
 
 const registerSourceSchema = z.object({
   sourceType: z.enum(['book', 'article', 'web', 'pdf', 'note', 'other']),
@@ -336,6 +366,16 @@ export function createApp() {
         message: error.message,
         thesisId: error.thesisId,
         taskId: error.taskId,
+      });
+    }
+
+    if (error instanceof WorkflowPackNotFoundError) {
+      return reply.status(404).send({
+        ok: false,
+        code: 'WORKFLOW_PACK_NOT_FOUND',
+        message: error.message,
+        thesisId: error.thesisId,
+        workflowPackId: error.workflowPackId,
       });
     }
 
@@ -647,6 +687,50 @@ export function createApp() {
     );
 
     return { ok: true, checkpoints };
+  });
+
+  app.post('/theses/:thesisId/workflow-packs', async (request, reply) => {
+    const payload = createWorkflowPackSchema.parse(request.body) as CreateWorkflowPackInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const workflowPack = await (await getThesisLifecycle()).service.createWorkflowPack(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, workflowPack });
+  });
+
+  app.get('/theses/:thesisId/workflow-packs', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const workflowPacks = await (await getThesisLifecycle()).service.listWorkflowPacks(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, workflowPacks };
+  });
+
+  app.get('/theses/:thesisId/workflow-packs/:workflowPackId', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; workflowPackId: string };
+    const workflowPack = await (await getThesisLifecycle()).service.getWorkflowPack(
+      params.thesisId,
+      params.workflowPackId,
+    );
+
+    return { ok: true, workflowPack };
+  });
+
+  app.patch('/theses/:thesisId/workflow-packs/:workflowPackId', async (request) => {
+    const payload = updateWorkflowPackSchema.parse(request.body) as UpdateWorkflowPackInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; workflowPackId: string };
+    const workflowPack = await (await getThesisLifecycle()).service.updateWorkflowPack(
+      params.thesisId,
+      params.workflowPackId,
+      payload,
+    );
+
+    return { ok: true, workflowPack };
   });
 
   app.get('/theses/:thesisId/evidence-context-setup', async (request) => {

@@ -31,6 +31,8 @@ import {
   type ThesisLifecycleState,
   workflowTaskCheckpoints,
   workflowTasks,
+  workflowPacks,
+  workflowSteps,
 } from '@thesis-research-os/db';
 
 type ThesisBlockers = string[];
@@ -403,6 +405,7 @@ export type ThesisResumePayload = {
   recentFeedback: ThesisFeedbackPayload[];
   activeTask: WorkflowTaskPayload | null;
   recentTaskCheckpoints: WorkflowTaskCheckpointPayload[];
+  workflowPacks: WorkflowPackPayload[];
   activeWorkspace: ActiveWorkspacePayload | null;
   latestComplianceRun: ComplianceRunPayload | null;
   latestAcademicQaRun: AcademicQaRunPayload | null;
@@ -523,6 +526,65 @@ export type WorkflowTaskCheckpointPayload = {
   checkpointedAt: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type WorkflowStepStatus = 'pending' | 'in_progress' | 'blocked' | 'completed';
+
+export type WorkflowStepPayload = {
+  id: string;
+  thesisId: string;
+  workflowPackId: string;
+  title: string;
+  description: string;
+  status: WorkflowStepStatus;
+  stepOrder: number;
+  isCurrent: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type WorkflowPackPayload = {
+  id: string;
+  thesisId: string;
+  name: string;
+  description: string;
+  status: WorkflowStepStatus;
+  currentStepId: string | null;
+  progress: {
+    totalSteps: number;
+    completedSteps: number;
+    blockedSteps: number;
+    pendingSteps: number;
+    inProgressSteps: number;
+  };
+  steps: WorkflowStepPayload[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateWorkflowPackInput = {
+  name: string;
+  description: string;
+  status?: WorkflowStepStatus;
+  currentStepId?: string | null;
+  steps: Array<{
+    title: string;
+    description: string;
+    status?: WorkflowStepStatus;
+    stepOrder?: number;
+  }>;
+};
+
+export type UpdateWorkflowPackInput = {
+  status?: WorkflowStepStatus;
+  currentStepId?: string | null;
+  steps?: Array<{
+    id: string;
+    status?: WorkflowStepStatus;
+    title?: string;
+    description?: string;
+    stepOrder?: number;
+  }>;
 };
 
 export type CreateWorkflowTaskCheckpointInput = {
@@ -1189,6 +1251,13 @@ export class WorkflowTaskNotFoundError extends Error {
   constructor(public readonly thesisId: string, public readonly taskId: string) {
     super(`Workflow task ${taskId} was not found for thesis ${thesisId}.`);
     this.name = 'WorkflowTaskNotFoundError';
+  }
+}
+
+export class WorkflowPackNotFoundError extends Error {
+  constructor(public readonly thesisId: string, public readonly workflowPackId: string) {
+    super(`Workflow pack ${workflowPackId} was not found for thesis ${thesisId}.`);
+    this.name = 'WorkflowPackNotFoundError';
   }
 }
 
@@ -2417,6 +2486,145 @@ export class ThesisLifecycleService {
     return this.mapWorkflowTaskCheckpointRecord(row);
   }
 
+  async createWorkflowPack(thesisId: string, input: CreateWorkflowPackInput): Promise<WorkflowPackPayload> {
+    await this.requireThesis(thesisId);
+
+    const now = new Date().toISOString();
+    const workflowPackId = randomUUID();
+    const orderedSteps = input.steps.map((step, index) => ({
+      id: randomUUID(),
+      title: step.title.trim(),
+      description: step.description.trim(),
+      status: step.status ?? 'pending',
+      stepOrder: step.stepOrder ?? index + 1,
+    })).sort((left, right) => left.stepOrder - right.stepOrder || left.id.localeCompare(right.id));
+
+    const resolvedCurrentStepId = input.currentStepId
+      ? orderedSteps.find((step) => step.id === input.currentStepId)?.id ?? null
+      : orderedSteps.find((step) => step.status === 'in_progress' || step.status === 'blocked')?.id ?? orderedSteps[0]?.id ?? null;
+
+    const resolvedStatus = input.status ?? this.deriveWorkflowPackStatus(orderedSteps.map((step) => step.status));
+
+    await this.db.transaction(async (tx) => {
+      await tx.insert(workflowPacks).values({
+        id: workflowPackId,
+        thesisId,
+        name: input.name.trim(),
+        description: input.description.trim(),
+        status: resolvedStatus,
+        currentStepId: resolvedCurrentStepId,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      if (orderedSteps.length > 0) {
+        await tx.insert(workflowSteps).values(
+          orderedSteps.map((step) => ({
+            id: step.id,
+            thesisId,
+            workflowPackId,
+            title: step.title,
+            description: step.description,
+            status: step.status,
+            stepOrder: step.stepOrder,
+            createdAt: now,
+            updatedAt: now,
+          })),
+        );
+      }
+    });
+
+    return this.getWorkflowPack(thesisId, workflowPackId);
+  }
+
+  async listWorkflowPacks(thesisId: string): Promise<WorkflowPackPayload[]> {
+    await this.requireThesis(thesisId);
+
+    const packRows = await this.db
+      .select()
+      .from(workflowPacks)
+      .where(eq(workflowPacks.thesisId, thesisId))
+      .orderBy(desc(workflowPacks.updatedAt), asc(workflowPacks.id))
+      .all();
+
+    return Promise.all(packRows.map((row) => this.mapWorkflowPackRecord(row)));
+  }
+
+  async getWorkflowPack(thesisId: string, workflowPackId: string): Promise<WorkflowPackPayload> {
+    await this.requireThesis(thesisId);
+    const row = await this.requireWorkflowPack(thesisId, workflowPackId);
+    return this.mapWorkflowPackRecord(row);
+  }
+
+  async updateWorkflowPack(
+    thesisId: string,
+    workflowPackId: string,
+    input: UpdateWorkflowPackInput,
+  ): Promise<WorkflowPackPayload> {
+    const existingPack = await this.requireWorkflowPack(thesisId, workflowPackId);
+    const existingSteps = await this.listWorkflowStepsForPack(thesisId, workflowPackId);
+    const existingStepsById = new Map(existingSteps.map((step) => [step.id, step]));
+    const now = new Date().toISOString();
+
+    if (input.steps) {
+      for (const stepUpdate of input.steps) {
+        if (!existingStepsById.has(stepUpdate.id)) {
+          throw new WorkflowPackNotFoundError(thesisId, workflowPackId);
+        }
+      }
+    }
+
+    await this.db.transaction(async (tx) => {
+      if (input.steps && input.steps.length > 0) {
+        for (const stepUpdate of input.steps) {
+          const current = existingStepsById.get(stepUpdate.id)!;
+          await tx
+            .update(workflowSteps)
+            .set({
+              title: stepUpdate.title?.trim() ?? current.title,
+              description: stepUpdate.description?.trim() ?? current.description,
+              status: stepUpdate.status ?? current.status,
+              stepOrder: stepUpdate.stepOrder ?? current.stepOrder,
+              updatedAt: now,
+            })
+            .where(eq(workflowSteps.id, stepUpdate.id));
+        }
+      }
+
+      const refreshedSteps = await tx
+        .select()
+        .from(workflowSteps)
+        .where(
+          and(
+            eq(workflowSteps.thesisId, thesisId),
+            eq(workflowSteps.workflowPackId, workflowPackId),
+          ),
+        )
+        .orderBy(asc(workflowSteps.stepOrder), asc(workflowSteps.id))
+        .all();
+
+      const resolvedCurrentStepId = input.currentStepId !== undefined
+        ? input.currentStepId
+        : refreshedSteps.find((step) => step.status === 'in_progress' || step.status === 'blocked')?.id
+          ?? refreshedSteps.find((step) => step.id === existingPack.currentStepId)?.id
+          ?? refreshedSteps[0]?.id
+          ?? null;
+
+      const resolvedStatus = input.status ?? this.deriveWorkflowPackStatus(refreshedSteps.map((step) => this.normalizeWorkflowStepStatus(step.status)));
+
+      await tx
+        .update(workflowPacks)
+        .set({
+          status: resolvedStatus,
+          currentStepId: resolvedCurrentStepId,
+          updatedAt: now,
+        })
+        .where(eq(workflowPacks.id, workflowPackId));
+    });
+
+    return this.getWorkflowPack(thesisId, workflowPackId);
+  }
+
   async getEvidenceContextSetup(thesisId: string): Promise<EvidenceContextSetupPayload> {
     const thesis = await this.requireThesis(thesisId);
 
@@ -2772,6 +2980,7 @@ export class ThesisLifecycleService {
     const checkpoints = await this.listCheckpoints(thesisId);
     const feedback = await this.listFeedback(thesisId);
     const tasks = await this.listWorkflowTasks(thesisId);
+    const workflowPacks = await this.listWorkflowPacks(thesisId);
     const complianceRuns = await this.listComplianceRuns(thesisId);
     const academicQaRuns = await this.listAcademicQaRuns(thesisId);
     const activeTask = tasks.find((task) => task.status === 'active' || task.status === 'in_progress') ?? tasks[0] ?? null;
@@ -2779,17 +2988,42 @@ export class ThesisLifecycleService {
       ? await this.listWorkflowTaskCheckpoints(thesisId, activeTask.id)
       : [];
 
+    const activeWorkflowPack = workflowPacks.find((pack) => pack.status === 'in_progress' || pack.status === 'blocked') ?? workflowPacks[0] ?? null;
+    const taskSpecificBlockers = activeTaskCheckpoints
+      .map((checkpoint) => checkpoint.blocker)
+      .filter((blocker): blocker is string => Boolean(blocker));
+    const packSpecificBlockers = activeWorkflowPack?.steps
+      .filter((step) => step.status === 'blocked')
+      .map((step) => `${step.title}: ${step.description}`) ?? [];
+
+    const mergedBlockers = [...detail.blockers, ...taskSpecificBlockers, ...packSpecificBlockers].filter(
+      (blocker, index, blockers) => blockers.indexOf(blocker) === index,
+    );
+
+    const activePackStep = activeWorkflowPack?.steps.find((step) => step.isCurrent)
+      ?? activeWorkflowPack?.steps.find((step) => step.status === 'in_progress' || step.status === 'blocked')
+      ?? null;
+
+    const nextAction = activeTask
+      ? activePackStep
+        ? `${activeTask.title}: continúa con "${activePackStep.title}".`
+        : `${activeTask.title}: ${activeTask.intent}`
+      : activePackStep
+        ? `Continúa con el flujo "${activeWorkflowPack?.name}" en el paso "${activePackStep.title}".`
+        : detail.nextStepSummary;
+
     return {
       thesis: detail.thesis,
       state: detail.state,
       latestStatusAt: detail.latestStatusAt,
       statusSummary: detail.statusSummary,
-      blockers: detail.blockers,
-      nextAction: detail.nextStepSummary,
+      blockers: mergedBlockers,
+      nextAction,
       latestCheckpoint: checkpoints[0] ?? null,
       recentFeedback: feedback.slice(0, 5),
       activeTask,
       recentTaskCheckpoints: activeTaskCheckpoints.slice(0, 5),
+      workflowPacks,
       activeWorkspace: detail.activeWorkspace,
       latestComplianceRun: complianceRuns[0] ?? null,
       latestAcademicQaRun: academicQaRuns[0] ?? null,
@@ -3188,6 +3422,33 @@ export class ThesisLifecycleService {
     return row;
   }
 
+  private async requireWorkflowPack(thesisId: string, workflowPackId: string) {
+    const row = await this.db.query.workflowPacks.findFirst({
+      where: (fields, operators) =>
+        operators.and(operators.eq(fields.id, workflowPackId), operators.eq(fields.thesisId, thesisId)),
+    });
+
+    if (!row) {
+      throw new WorkflowPackNotFoundError(thesisId, workflowPackId);
+    }
+
+    return row;
+  }
+
+  private async listWorkflowStepsForPack(thesisId: string, workflowPackId: string) {
+    return this.db
+      .select()
+      .from(workflowSteps)
+      .where(
+        and(
+          eq(workflowSteps.thesisId, thesisId),
+          eq(workflowSteps.workflowPackId, workflowPackId),
+        ),
+      )
+      .orderBy(asc(workflowSteps.stepOrder), asc(workflowSteps.id))
+      .all();
+  }
+
   private mapIntakeJobRecord(record: {
     id: string;
     thesisId: string;
@@ -3407,6 +3668,81 @@ export class ThesisLifecycleService {
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
     };
+  }
+
+  private async mapWorkflowPackRecord(record: typeof workflowPacks.$inferSelect): Promise<WorkflowPackPayload> {
+    const steps = (await this.listWorkflowStepsForPack(record.thesisId, record.id)).map((step) =>
+      this.mapWorkflowStepRecord(step, record.currentStepId),
+    );
+
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      name: record.name,
+      description: record.description,
+      status: this.normalizeWorkflowStepStatus(record.status),
+      currentStepId: record.currentStepId,
+      progress: {
+        totalSteps: steps.length,
+        completedSteps: steps.filter((step) => step.status === 'completed').length,
+        blockedSteps: steps.filter((step) => step.status === 'blocked').length,
+        pendingSteps: steps.filter((step) => step.status === 'pending').length,
+        inProgressSteps: steps.filter((step) => step.status === 'in_progress').length,
+      },
+      steps,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  private mapWorkflowStepRecord(
+    record: typeof workflowSteps.$inferSelect,
+    currentStepId: string | null,
+  ): WorkflowStepPayload {
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      workflowPackId: record.workflowPackId,
+      title: record.title,
+      description: record.description,
+      status: this.normalizeWorkflowStepStatus(record.status),
+      stepOrder: record.stepOrder,
+      isCurrent: record.id === currentStepId,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
+  private normalizeWorkflowStepStatus(status: string): WorkflowStepStatus {
+    if (status === 'completed') {
+      return 'completed';
+    }
+
+    if (status === 'blocked') {
+      return 'blocked';
+    }
+
+    if (status === 'in_progress' || status === 'active') {
+      return 'in_progress';
+    }
+
+    return 'pending';
+  }
+
+  private deriveWorkflowPackStatus(statuses: WorkflowStepStatus[]): WorkflowStepStatus {
+    if (statuses.some((status) => status === 'blocked')) {
+      return 'blocked';
+    }
+
+    if (statuses.length > 0 && statuses.every((status) => status === 'completed')) {
+      return 'completed';
+    }
+
+    if (statuses.some((status) => status === 'in_progress')) {
+      return 'in_progress';
+    }
+
+    return 'pending';
   }
 
   private async mapSourceRecord(record: typeof sources.$inferSelect): Promise<SourcePayload> {

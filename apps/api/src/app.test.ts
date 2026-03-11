@@ -2198,6 +2198,256 @@ Conclusiones finales.
     });
   });
 
+  it('exposes ordered workflow pack steps, current-step progress, and resume blockers for continuation flows', async () => {
+    const thesisResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis con pack de flujo activo',
+        degreeProgram: 'Doctorado en Humanidades Digitales',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-workflow-pack',
+      },
+    });
+
+    expect(thesisResponse.statusCode).toBe(201);
+    const thesisId = (thesisResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const taskResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/tasks`,
+      payload: {
+        title: 'Cerrar rutina de revisión bibliográfica',
+        intent: 'Avanzar el flujo activo sin reiniciar la rutina de revisión.',
+        status: 'in_progress',
+        priority: 5,
+        sortOrder: 1,
+      },
+    });
+
+    expect(taskResponse.statusCode).toBe(201);
+    const taskId = (taskResponse.json() as { task: { id: string } }).task.id;
+
+    const taskCheckpointResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/tasks/${taskId}/checkpoints`,
+      payload: {
+        label: 'Revisión detenida',
+        summary: 'La rutina quedó detenida en la validación de fuentes prioritarias.',
+        progressPercent: 60,
+        blocker: 'Falta confirmar dos citas clave con el tutor.',
+        checkpointedAt: '2026-03-11T10:00:00.000Z',
+      },
+    });
+
+    expect(taskCheckpointResponse.statusCode).toBe(201);
+
+    const createPackResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/workflow-packs`,
+      payload: {
+        name: 'Rutina de revisión bibliográfica',
+        description: 'Ordena los pasos para revisar fuentes y reanudar la continuidad del capítulo.',
+        steps: [
+          {
+            title: 'Reunir citas prioritarias',
+            description: 'Identifica las referencias críticas para el capítulo actual.',
+            status: 'completed',
+            stepOrder: 1,
+          },
+          {
+            title: 'Validar citas con tutor',
+            description: 'Esperar confirmación del tutor sobre dos citas pendientes.',
+            status: 'blocked',
+            stepOrder: 2,
+          },
+          {
+            title: 'Actualizar sección del marco teórico',
+            description: 'Aplicar los cambios aprobados al borrador.',
+            status: 'pending',
+            stepOrder: 3,
+          },
+        ],
+      },
+    });
+
+    expect(createPackResponse.statusCode).toBe(201);
+    const createdPack = createPackResponse.json() as {
+      workflowPack: {
+        id: string;
+        status: string;
+        currentStepId: string | null;
+        progress: {
+          totalSteps: number;
+          completedSteps: number;
+          blockedSteps: number;
+          pendingSteps: number;
+          inProgressSteps: number;
+        };
+        steps: Array<{
+          id: string;
+          title: string;
+          status: string;
+          stepOrder: number;
+          isCurrent: boolean;
+        }>;
+      };
+    };
+
+    expect(createdPack.workflowPack.status).toBe('blocked');
+    expect(createdPack.workflowPack.progress).toEqual({
+      totalSteps: 3,
+      completedSteps: 1,
+      blockedSteps: 1,
+      pendingSteps: 1,
+      inProgressSteps: 0,
+    });
+    expect(createdPack.workflowPack.steps.map((step) => ({
+      title: step.title,
+      status: step.status,
+      stepOrder: step.stepOrder,
+      isCurrent: step.isCurrent,
+    }))).toEqual([
+      {
+        title: 'Reunir citas prioritarias',
+        status: 'completed',
+        stepOrder: 1,
+        isCurrent: false,
+      },
+      {
+        title: 'Validar citas con tutor',
+        status: 'blocked',
+        stepOrder: 2,
+        isCurrent: true,
+      },
+      {
+        title: 'Actualizar sección del marco teórico',
+        status: 'pending',
+        stepOrder: 3,
+        isCurrent: false,
+      },
+    ]);
+
+    const blockedStepId = createdPack.workflowPack.steps[1]?.id;
+    expect(createdPack.workflowPack.currentStepId).toBe(blockedStepId);
+
+    const patchPackResponse = await app.inject({
+      method: 'PATCH',
+      url: `/theses/${thesisId}/workflow-packs/${createdPack.workflowPack.id}`,
+      payload: {
+        status: 'in_progress',
+        currentStepId: createdPack.workflowPack.steps[2]?.id,
+        steps: [
+          {
+            id: blockedStepId,
+            status: 'completed',
+          },
+          {
+            id: createdPack.workflowPack.steps[2]?.id,
+            status: 'in_progress',
+          },
+        ],
+      },
+    });
+
+    expect(patchPackResponse.statusCode).toBe(200);
+
+    const detailPackResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/workflow-packs/${createdPack.workflowPack.id}`,
+    });
+    const listPacksResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/workflow-packs`,
+    });
+    const resumeResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/resume`,
+    });
+
+    expect(detailPackResponse.statusCode).toBe(200);
+    expect(listPacksResponse.statusCode).toBe(200);
+    expect(resumeResponse.statusCode).toBe(200);
+
+    expect((detailPackResponse.json() as {
+      workflowPack: {
+        status: string;
+        currentStepId: string | null;
+        progress: {
+          totalSteps: number;
+          completedSteps: number;
+          blockedSteps: number;
+          pendingSteps: number;
+          inProgressSteps: number;
+        };
+        steps: Array<{ title: string; status: string; isCurrent: boolean }>;
+      };
+    }).workflowPack).toMatchObject({
+      status: 'in_progress',
+      currentStepId: createdPack.workflowPack.steps[2]?.id,
+      progress: {
+        totalSteps: 3,
+        completedSteps: 2,
+        blockedSteps: 0,
+        pendingSteps: 0,
+        inProgressSteps: 1,
+      },
+      steps: [
+        { title: 'Reunir citas prioritarias', status: 'completed', isCurrent: false },
+        { title: 'Validar citas con tutor', status: 'completed', isCurrent: false },
+        { title: 'Actualizar sección del marco teórico', status: 'in_progress', isCurrent: true },
+      ],
+    });
+
+    expect((listPacksResponse.json() as {
+      workflowPacks: Array<{ id: string; status: string; currentStepId: string | null }>;
+    }).workflowPacks).toEqual([
+      expect.objectContaining({
+        id: createdPack.workflowPack.id,
+        status: 'in_progress',
+        currentStepId: createdPack.workflowPack.steps[2]?.id,
+      }),
+    ]);
+
+    expect((resumeResponse.json() as {
+      resume: {
+        activeTask: { id: string; status: string } | null;
+        blockers: string[];
+        nextAction: string;
+        workflowPacks: Array<{
+          id: string;
+          status: string;
+          currentStepId: string | null;
+          steps: Array<{ title: string; status: string; isCurrent: boolean }>;
+          progress: { completedSteps: number; inProgressSteps: number };
+        }>;
+      };
+    }).resume).toMatchObject({
+      activeTask: {
+        id: taskId,
+        status: 'in_progress',
+      },
+      blockers: ['Falta confirmar dos citas clave con el tutor.'],
+      nextAction: 'Cerrar rutina de revisión bibliográfica: continúa con "Actualizar sección del marco teórico".',
+      workflowPacks: [
+        {
+          id: createdPack.workflowPack.id,
+          status: 'in_progress',
+          currentStepId: createdPack.workflowPack.steps[2]?.id,
+          progress: {
+            completedSteps: 2,
+            inProgressSteps: 1,
+          },
+          steps: [
+            { title: 'Reunir citas prioritarias', status: 'completed', isCurrent: false },
+            { title: 'Validar citas con tutor', status: 'completed', isCurrent: false },
+            { title: 'Actualizar sección del marco teórico', status: 'in_progress', isCurrent: true },
+          ],
+        },
+      ],
+    });
+  });
+
   it('fails safely for unknown workflow task detail and checkpoint routes', async () => {
     const thesisResponse = await app.inject({
       method: 'POST',
@@ -2237,6 +2487,44 @@ Conclusiones finales.
         message: `Workflow task missing-task was not found for thesis ${thesisId}.`,
         thesisId,
         taskId: 'missing-task',
+      });
+    }
+  });
+
+  it('fails safely for unknown workflow pack detail and update routes', async () => {
+    const thesisResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis sin workflow pack conocido',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-unknown-pack',
+      },
+    });
+
+    const thesisId = (thesisResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const detailResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/workflow-packs/missing-pack`,
+    });
+    const patchResponse = await app.inject({
+      method: 'PATCH',
+      url: `/theses/${thesisId}/workflow-packs/missing-pack`,
+      payload: {
+        status: 'blocked',
+      },
+    });
+
+    for (const response of [detailResponse, patchResponse]) {
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({
+        ok: false,
+        code: 'WORKFLOW_PACK_NOT_FOUND',
+        message: `Workflow pack missing-pack was not found for thesis ${thesisId}.`,
+        thesisId,
+        workflowPackId: 'missing-pack',
       });
     }
   });
