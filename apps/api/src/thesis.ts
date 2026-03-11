@@ -360,6 +360,7 @@ export type ActiveWorkspacePayload = {
   replacementOfIntakeJobId: string | null;
   replacedByIntakeJobId: string | null;
   recoverableCheckpointId: string | null;
+  latestBuildRunId: string | null;
 };
 
 export type ThesisCheckpointPayload = {
@@ -400,6 +401,10 @@ export type ThesisResumePayload = {
   latestCheckpoint: ThesisCheckpointPayload | null;
   recentFeedback: ThesisFeedbackPayload[];
   activeWorkspace: ActiveWorkspacePayload | null;
+  latestComplianceRun: ComplianceRunPayload | null;
+  latestAcademicQaRun: AcademicQaRunPayload | null;
+  recentComplianceFindings: ComplianceIssuePayload[];
+  recentAcademicQaFindings: AcademicQaIssuePayload[];
 };
 
 export type IntakeJobPayload = {
@@ -850,6 +855,12 @@ export type ComplianceIssuePayload = {
   message: string;
   remediation: string | null;
   disposition: PolicyRuleDisposition;
+  evidenceContext: {
+    sourceIds: string[];
+    evidenceFragmentIds: string[];
+    zoteroMappingIds: string[];
+    buildRunId: string | null;
+  };
   createdAt: string;
   updatedAt: string;
 };
@@ -890,6 +901,12 @@ export type AcademicQaIssuePayload = {
   rationale: string;
   remediation: string | null;
   triggeringCondition: string;
+  supportContext: {
+    sourceIds: string[];
+    evidenceFragmentIds: string[];
+    zoteroMappingIds: string[];
+    buildRunId: string | null;
+  };
   groundedIn: {
     entityType: 'claim' | 'section';
     entityId: string;
@@ -2634,6 +2651,8 @@ export class ThesisLifecycleService {
     const detail = await this.getThesisDetail(thesisId);
     const checkpoints = await this.listCheckpoints(thesisId);
     const feedback = await this.listFeedback(thesisId);
+    const complianceRuns = await this.listComplianceRuns(thesisId);
+    const academicQaRuns = await this.listAcademicQaRuns(thesisId);
 
     return {
       thesis: detail.thesis,
@@ -2645,6 +2664,10 @@ export class ThesisLifecycleService {
       latestCheckpoint: checkpoints[0] ?? null,
       recentFeedback: feedback.slice(0, 5),
       activeWorkspace: detail.activeWorkspace,
+      latestComplianceRun: complianceRuns[0] ?? null,
+      latestAcademicQaRun: academicQaRuns[0] ?? null,
+      recentComplianceFindings: (complianceRuns[0]?.issues ?? []).slice(0, 5),
+      recentAcademicQaFindings: (academicQaRuns[0]?.issues ?? []).slice(0, 5),
     };
   }
 
@@ -2988,6 +3011,7 @@ export class ThesisLifecycleService {
       replacementOfIntakeJobId: report?.replacement?.replacesIntakeJobId ?? null,
       replacedByIntakeJobId: report?.replacement?.replacedByIntakeJobId ?? null,
       recoverableCheckpointId: report?.replacement?.recoverableCheckpointId ?? null,
+      latestBuildRunId: (await this.requireThesis(thesisId)).activeBuildRunId,
     };
   }
 
@@ -3574,7 +3598,7 @@ export class ThesisLifecycleService {
       .orderBy(asc(complianceIssues.ruleId), asc(complianceIssues.id))
       .all();
 
-    const mappedIssues = issues.map((issue) => this.mapComplianceIssueRecord(issue));
+    const mappedIssues = await Promise.all(issues.map((issue) => this.mapComplianceIssueRecord(issue)));
     const issueByRule = new Map(mappedIssues.map((issue) => [issue.ruleId, issue]));
     const persistedRuleResults = parseComplianceRuleResults(summaryPayload.ruleResults);
     const profilePayload = this.mapPolicyProfileRecord(policyProfile);
@@ -3626,7 +3650,14 @@ export class ThesisLifecycleService {
     };
   }
 
-  private mapComplianceIssueRecord(record: typeof complianceIssues.$inferSelect): ComplianceIssuePayload {
+  private async mapComplianceIssueRecord(record: typeof complianceIssues.$inferSelect): Promise<ComplianceIssuePayload> {
+    const thesis = await this.requireThesis(record.thesisId);
+    const evidenceFragmentsForThesis = await this.listEvidenceFragments(record.thesisId);
+    const zoteroMappingsForThesis = await this.listZoteroMappings(record.thesisId);
+    const relatedEvidenceFragments = evidenceFragmentsForThesis.filter((fragment) =>
+      record.normalizedNodeId ? fragment.normalizedNodeId === record.normalizedNodeId : true,
+    );
+
     return {
       id: record.id,
       thesisId: record.thesisId,
@@ -3638,6 +3669,14 @@ export class ThesisLifecycleService {
       message: record.message,
       remediation: record.remediation,
       disposition: normalizePolicyRuleDisposition(record.disposition),
+      evidenceContext: {
+        sourceIds: Array.from(new Set(relatedEvidenceFragments.map((fragment) => fragment.sourceId))),
+        evidenceFragmentIds: relatedEvidenceFragments.map((fragment) => fragment.id),
+        zoteroMappingIds: zoteroMappingsForThesis
+          .filter((mapping) => record.normalizedNodeId ? mapping.normalizedNodeId === record.normalizedNodeId || mapping.scope === 'thesis' : mapping.scope === 'thesis')
+          .map((mapping) => mapping.id),
+        buildRunId: thesis.activeBuildRunId,
+      },
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
     };
@@ -3653,7 +3692,7 @@ export class ThesisLifecycleService {
       .where(eq(academicQaIssues.academicQaRunId, record.id))
       .orderBy(asc(academicQaIssues.category), asc(academicQaIssues.id))
       .all();
-    const mappedIssues = issues.map((issue) => this.mapAcademicQaIssueRecord(issue));
+    const mappedIssues = await Promise.all(issues.map((issue) => this.mapAcademicQaIssueRecord(issue)));
     const issueCategories = Array.from(new Set(mappedIssues.map((issue) => issue.category))).sort() as AcademicQaIssueCategory[];
 
     return {
@@ -3672,10 +3711,14 @@ export class ThesisLifecycleService {
     };
   }
 
-  private mapAcademicQaIssueRecord(record: typeof academicQaIssues.$inferSelect): AcademicQaIssuePayload {
+  private async mapAcademicQaIssueRecord(record: typeof academicQaIssues.$inferSelect): Promise<AcademicQaIssuePayload> {
     const category = this.normalizeAcademicQaIssueCategory(record.category);
     const groundedEntityType = record.claimId ? 'claim' : 'section';
     const groundedEntityId = record.claimId ?? record.normalizedNodeId ?? '';
+    const thesis = await this.requireThesis(record.thesisId);
+    const claimsForThesis = await this.listClaims(record.thesisId);
+    const zoteroMappingsForThesis = await this.listZoteroMappings(record.thesisId);
+    const matchingClaim = record.claimId ? claimsForThesis.find((claim) => claim.id === record.claimId) ?? null : null;
 
     return {
       id: record.id,
@@ -3689,6 +3732,14 @@ export class ThesisLifecycleService {
       rationale: record.rationale,
       remediation: record.remediation,
       triggeringCondition: record.triggeringCondition,
+      supportContext: {
+        sourceIds: matchingClaim?.traceability.sourceIds ?? [],
+        evidenceFragmentIds: matchingClaim?.traceability.evidenceFragments.map((fragment) => fragment.id) ?? [],
+        zoteroMappingIds: zoteroMappingsForThesis
+          .filter((mapping) => record.normalizedNodeId ? mapping.normalizedNodeId === record.normalizedNodeId || mapping.scope === 'thesis' : mapping.scope === 'thesis')
+          .map((mapping) => mapping.id),
+        buildRunId: thesis.activeBuildRunId,
+      },
       groundedIn: {
         entityType: groundedEntityType,
         entityId: groundedEntityId,

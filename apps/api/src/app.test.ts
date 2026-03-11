@@ -1163,6 +1163,10 @@ describe('thesis lifecycle registry routes', () => {
         nextAction: string;
         latestCheckpoint: { id: string; thesisId: string; label: string | null; scope: string; reason: string } | null;
         recentFeedback: Array<{ id: string; thesisId: string; sourceType: string; body: string; summary: string | null }>;
+        latestComplianceRun: { id: string } | null;
+        latestAcademicQaRun: { id: string } | null;
+        recentComplianceFindings: Array<unknown>;
+        recentAcademicQaFindings: Array<unknown>;
       };
     };
 
@@ -1205,6 +1209,317 @@ describe('thesis lifecycle registry routes', () => {
       (feedbackOlder.json() as { feedback: { id: string } }).feedback.id,
     ]);
     expect(resumePayload.resume.recentFeedback.every((entry) => entry.thesisId === thesisAId)).toBe(true);
+    expect(resumePayload.resume.latestComplianceRun).toBeNull();
+    expect(resumePayload.resume.latestAcademicQaRun).toBeNull();
+    expect(resumePayload.resume.recentComplianceFindings).toEqual([]);
+    expect(resumePayload.resume.recentAcademicQaFindings).toEqual([]);
+  });
+
+  it('preserves thesis-scoped QA and compliance continuity, grounded support context, fresh reruns, and traceability in resume flows', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'crossflow-support-aware-'));
+    const latexDir = path.join(fixtureRoot, 'latex-project');
+    fs.mkdirSync(latexDir, { recursive: true });
+    const mainTex = path.join(latexDir, 'main.tex');
+
+    fs.writeFileSync(
+      mainTex,
+      String.raw`\documentclass{report}
+\begin{document}
+\chapter{Introducción}
+Marco inicial.
+
+\chapter{Metodología}
+\section{Metodología}
+Diseño del estudio.
+
+\chapter{Resultados}
+\section{Resultados}
+Hallazgos principales.
+\end{document}
+`,
+      'utf8',
+    );
+
+    const createPrimaryResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis continuidad cruzada',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+    const createSecondaryResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis aislada secundaria',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+
+    const primaryThesisId = (createPrimaryResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const secondaryThesisId = (createSecondaryResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${primaryThesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const setupResponse = await app.inject({ method: 'GET', url: `/theses/${primaryThesisId}/evidence-context-setup` });
+    expect(setupResponse.statusCode).toBe(200);
+    const setup = (setupResponse.json() as {
+      setup: {
+        normalizedNodes: Array<{ id: string; title: string | null; nodeType: string }>;
+      };
+    }).setup;
+    const methodologyNode = setup.normalizedNodes.find((node) => node.title?.includes('Metodología') && node.nodeType === 'section');
+    const resultsNode = setup.normalizedNodes.find((node) => node.title?.includes('Resultados') && node.nodeType === 'section');
+    expect(methodologyNode).toBeTruthy();
+    expect(resultsNode).toBeTruthy();
+
+    const sourceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${primaryThesisId}/sources`,
+      payload: {
+        sourceType: 'article',
+        title: 'Base empírica principal',
+        authors: ['Ana Evidencia'],
+        publicationYear: 2024,
+      },
+    });
+    expect(sourceResponse.statusCode).toBe(201);
+    const sourceId = (sourceResponse.json() as { source: { id: string } }).source.id;
+
+    const evidenceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${primaryThesisId}/evidence-fragments`,
+      payload: {
+        sourceId,
+        normalizedNodeId: resultsNode!.id,
+        snippet: 'El experimento mostró mejoras del 10%.',
+        extractionMethod: 'manual',
+        locator: 'p. 12',
+      },
+    });
+    expect(evidenceResponse.statusCode).toBe(201);
+    const evidenceId = (evidenceResponse.json() as { evidenceFragment: { id: string } }).evidenceFragment.id;
+
+    const claimResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${primaryThesisId}/claims`,
+      payload: {
+        text: 'Los resultados son consistentes con la literatura previa.',
+        normalizedNodeId: resultsNode!.id,
+      },
+    });
+    expect(claimResponse.statusCode).toBe(201);
+    const claimId = (claimResponse.json() as { claim: { id: string } }).claim.id;
+
+    const linkEvidenceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${primaryThesisId}/claims/${claimId}/evidence-links`,
+      payload: {
+        evidenceFragmentIds: [evidenceId],
+        rationale: 'La evidencia respalda el resultado reportado.',
+      },
+    });
+    expect(linkEvidenceResponse.statusCode).toBe(200);
+
+    const zoteroMappingResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${primaryThesisId}/zotero-mappings`,
+      payload: {
+        scope: 'thesis',
+        libraryId: 'lib-user-main',
+        collectionKey: 'col-ml-core',
+        itemKey: 'item-traceability-2024',
+      },
+    });
+    expect(zoteroMappingResponse.statusCode).toBe(201);
+    const zoteroMappingId = (zoteroMappingResponse.json() as { mapping: { id: string } }).mapping.id;
+
+    const firstBuildResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${primaryThesisId}/latex/builds`,
+      payload: { createdBy: 'qa-reviewer' },
+    });
+    expect(firstBuildResponse.statusCode).toBe(201);
+    const firstBuildRunId = (firstBuildResponse.json() as { build: { buildRun: { id: string } } }).build.buildRun.id;
+
+    const firstComplianceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${primaryThesisId}/compliance-runs`,
+    });
+    const firstQaResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${primaryThesisId}/academic-qa-runs`,
+    });
+    expect(firstComplianceResponse.statusCode).toBe(201);
+    expect(firstQaResponse.statusCode).toBe(201);
+
+    const firstComplianceRun = (firstComplianceResponse.json() as { complianceRun: { id: string; issues: Array<{ id: string }> } }).complianceRun;
+    const firstAcademicQaRun = (firstQaResponse.json() as { academicQaRun: { id: string; issues: Array<{ id: string; category: string }> } }).academicQaRun;
+
+    const secondaryComplianceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${secondaryThesisId}/compliance-runs`,
+    });
+    const secondaryQaResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${secondaryThesisId}/academic-qa-runs`,
+    });
+    expect(secondaryComplianceResponse.statusCode).toBe(201);
+    expect(secondaryQaResponse.statusCode).toBe(201);
+
+    const initialResumeResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${primaryThesisId}/resume`,
+    });
+    expect(initialResumeResponse.statusCode).toBe(200);
+
+    const initialResume = (initialResumeResponse.json() as {
+      resume: {
+        activeWorkspace: { latestBuildRunId: string | null } | null;
+        latestComplianceRun: { id: string } | null;
+        latestAcademicQaRun: { id: string } | null;
+        recentComplianceFindings: Array<{ id: string; thesisId: string; complianceRunId: string; evidenceContext: { sourceIds: string[]; evidenceFragmentIds: string[]; zoteroMappingIds: string[]; buildRunId: string | null } }>;
+        recentAcademicQaFindings: Array<{ id: string; thesisId: string; academicQaRunId: string; claimId: string | null; normalizedNodeId: string | null; supportContext: { sourceIds: string[]; evidenceFragmentIds: string[]; zoteroMappingIds: string[]; buildRunId: string | null } }>;
+      };
+    }).resume;
+
+    expect(initialResume.activeWorkspace?.latestBuildRunId).toBe(firstBuildRunId);
+    expect(initialResume.latestComplianceRun?.id).toBe(firstComplianceRun.id);
+    expect(initialResume.latestAcademicQaRun?.id).toBe(firstAcademicQaRun.id);
+    expect(initialResume.recentComplianceFindings.every((issue) => issue.thesisId === primaryThesisId)).toBe(true);
+    expect(initialResume.recentAcademicQaFindings.every((issue) => issue.thesisId === primaryThesisId)).toBe(true);
+    expect(initialResume.recentComplianceFindings.some((issue) => issue.complianceRunId === firstComplianceRun.id)).toBe(true);
+    expect(initialResume.recentAcademicQaFindings.some((issue) => issue.academicQaRunId === firstAcademicQaRun.id)).toBe(true);
+
+    const evidenceLinkedFinding = initialResume.recentAcademicQaFindings.find((issue) => issue.claimId === claimId);
+    expect(evidenceLinkedFinding).toMatchObject({
+      normalizedNodeId: resultsNode!.id,
+      supportContext: {
+        sourceIds: [sourceId],
+        evidenceFragmentIds: [evidenceId],
+        zoteroMappingIds: [zoteroMappingId],
+        buildRunId: firstBuildRunId,
+      },
+    });
+
+    const methodologyFinding = initialResume.recentAcademicQaFindings.find((issue) => issue.normalizedNodeId === methodologyNode!.id);
+    expect(methodologyFinding?.supportContext.buildRunId).toBe(firstBuildRunId);
+
+    const complianceIssueWithContext = initialResume.recentComplianceFindings[0];
+    expect(complianceIssueWithContext?.evidenceContext.buildRunId).toBe(firstBuildRunId);
+    expect(complianceIssueWithContext?.evidenceContext.sourceIds).toEqual([sourceId]);
+    expect(complianceIssueWithContext?.evidenceContext.evidenceFragmentIds).toEqual([evidenceId]);
+    expect(complianceIssueWithContext?.evidenceContext.zoteroMappingIds).toEqual([zoteroMappingId]);
+
+    fs.writeFileSync(
+      mainTex,
+      String.raw`\documentclass{report}
+\begin{document}
+\chapter{Introducción}
+Marco inicial.
+
+\chapter{Metodología}
+\section{Metodología}
+Diseño del estudio.
+
+\chapter{Resultados}
+\section{Resultados}
+Hallazgos principales.
+
+\chapter{Conclusiones}
+\section{Conclusiones}
+Conclusiones finales.
+\end{document}
+`,
+      'utf8',
+    );
+
+    const reimportResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${primaryThesisId}/intake-jobs`,
+      payload: { importRootPath: latexDir },
+    });
+    expect(reimportResponse.statusCode).toBe(201);
+
+    const secondBuildResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${primaryThesisId}/latex/builds`,
+      payload: { createdBy: 'qa-reviewer' },
+    });
+    expect(secondBuildResponse.statusCode).toBe(201);
+    const secondBuildRunId = (secondBuildResponse.json() as { build: { buildRun: { id: string } } }).build.buildRun.id;
+
+    const secondComplianceResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${primaryThesisId}/compliance-runs`,
+    });
+    const secondQaResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${primaryThesisId}/academic-qa-runs`,
+    });
+    expect(secondComplianceResponse.statusCode).toBe(201);
+    expect(secondQaResponse.statusCode).toBe(201);
+
+    const secondComplianceRun = (secondComplianceResponse.json() as { complianceRun: { id: string; issues: Array<{ id: string }> } }).complianceRun;
+    const secondAcademicQaRun = (secondQaResponse.json() as { academicQaRun: { id: string; issues: Array<{ id: string; category: string }> } }).academicQaRun;
+
+    expect(secondComplianceRun.id).not.toBe(firstComplianceRun.id);
+    expect(secondAcademicQaRun.id).not.toBe(firstAcademicQaRun.id);
+    expect(secondComplianceRun.issues).toEqual([]);
+    expect(secondAcademicQaRun.issues.map((issue) => issue.id)).not.toEqual(firstAcademicQaRun.issues.map((issue) => issue.id));
+
+    const finalResumeResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${primaryThesisId}/resume`,
+    });
+    const secondaryResumeResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${secondaryThesisId}/resume`,
+    });
+    expect(finalResumeResponse.statusCode).toBe(200);
+    expect(secondaryResumeResponse.statusCode).toBe(200);
+
+    const finalResume = (finalResumeResponse.json() as {
+      resume: {
+        activeWorkspace: { latestBuildRunId: string | null } | null;
+        latestComplianceRun: { id: string } | null;
+        latestAcademicQaRun: { id: string } | null;
+        recentComplianceFindings: Array<{ id: string; complianceRunId: string; evidenceContext: { buildRunId: string | null } }>;
+        recentAcademicQaFindings: Array<{ id: string; academicQaRunId: string; supportContext: { buildRunId: string | null } }>;
+      };
+    }).resume;
+    const secondaryResume = (secondaryResumeResponse.json() as {
+      resume: {
+        latestComplianceRun: { id: string } | null;
+        latestAcademicQaRun: { id: string } | null;
+        recentComplianceFindings: Array<{ thesisId: string }>;
+        recentAcademicQaFindings: Array<{ thesisId: string }>;
+      };
+    }).resume;
+
+    expect(finalResume.activeWorkspace?.latestBuildRunId).toBe(secondBuildRunId);
+    expect(finalResume.latestComplianceRun?.id).toBe(secondComplianceRun.id);
+    expect(finalResume.latestAcademicQaRun?.id).toBe(secondAcademicQaRun.id);
+    expect(finalResume.recentComplianceFindings.every((issue) => issue.complianceRunId === secondComplianceRun.id)).toBe(true);
+    expect(finalResume.recentAcademicQaFindings.every((issue) => issue.academicQaRunId === secondAcademicQaRun.id)).toBe(true);
+    expect(finalResume.recentComplianceFindings.every((issue) => issue.evidenceContext.buildRunId === secondBuildRunId)).toBe(true);
+    expect(finalResume.recentAcademicQaFindings.every((issue) => issue.supportContext.buildRunId === secondBuildRunId)).toBe(true);
+    expect(secondaryResume.latestComplianceRun?.id).not.toBe(secondComplianceRun.id);
+    expect(secondaryResume.latestAcademicQaRun?.id).not.toBe(secondAcademicQaRun.id);
+    expect(secondaryResume.recentComplianceFindings.every((issue) => issue.thesisId === secondaryThesisId)).toBe(true);
+    expect(secondaryResume.recentAcademicQaFindings.every((issue) => issue.thesisId === secondaryThesisId)).toBe(true);
+
+    fs.rmSync(fixtureRoot, { recursive: true, force: true });
   });
 
   it('fails safely for unknown thesis memory and resume routes', async () => {
