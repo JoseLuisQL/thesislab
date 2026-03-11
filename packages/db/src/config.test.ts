@@ -11,6 +11,16 @@ describe('database config helpers', () => {
     );
   });
 
+  it('resolves the source workspace root to the monorepo root', () => {
+    expect(getWorkspaceRoot()).toBe(path.resolve(import.meta.dirname, '../..'));
+  });
+
+  it('resolves the built workspace root to the monorepo root instead of the packages directory', async () => {
+    const { getWorkspaceRoot: getBuiltWorkspaceRoot } = await import('../dist/src/config.js');
+
+    expect(getBuiltWorkspaceRoot()).toBe(path.resolve(import.meta.dirname, '../../..'));
+  });
+
   it('resolves file: DATABASE_URL values against the workspace root', () => {
     expect(getDatabaseFilePath('file:./tmp/test.sqlite')).toBe(
       path.resolve(getWorkspaceRoot(), 'tmp/test.sqlite'),
@@ -23,7 +33,7 @@ describe('database config helpers', () => {
 
   it('exposes the package-local drizzle migrations folder', () => {
     expect(getMigrationsDirectory()).toBe(
-      path.resolve(getWorkspaceRoot(), 'packages/db/drizzle'),
+      path.resolve(getWorkspaceRoot(), 'db/drizzle'),
     );
   });
 });

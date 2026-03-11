@@ -5,7 +5,19 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_DATABASE_RELATIVE_PATH = path.join('data', 'thesis-research-os.sqlite');
 
 export function getWorkspaceRoot() {
-  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
+  const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const candidateRoots = [
+    path.resolve(moduleDirectory, moduleDirectory.includes(`${path.sep}dist${path.sep}`) ? '../../../..' : '../..'),
+    path.resolve(moduleDirectory, moduleDirectory.includes(`${path.sep}dist${path.sep}`) ? '../../..' : '..'),
+  ];
+
+  for (const candidate of candidateRoots) {
+    if (pathExists(path.join(candidate, 'package.json')) && pathExists(path.join(candidate, 'pnpm-workspace.yaml'))) {
+      return candidate;
+    }
+  }
+
+  return candidateRoots[0];
 }
 
 export function getDatabaseFilePath(databaseUrl = process.env.DATABASE_URL) {

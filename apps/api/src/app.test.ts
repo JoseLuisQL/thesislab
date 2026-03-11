@@ -7,7 +7,7 @@ import zlib from 'node:zlib';
 
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createApp } from './app.js';
+import { createApp, resolveRuntimeDatabaseUrl } from './app.js';
 import { createDatabaseConnection } from '@thesis-research-os/db';
 
 describe('GET /health', () => {
@@ -246,6 +246,19 @@ describe('GET /status/capabilities', () => {
       }),
     );
   });
+});
+
+describe('resolveRuntimeDatabaseUrl', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('uses a relative workspace database path when no explicit database env is configured', async () => {
+    vi.stubEnv('HOST_REPO_ROOT', '/root/thesislab');
+
+    expect(resolveRuntimeDatabaseUrl()).toBe(`file:${path.resolve(process.cwd(), 'data', 'thesis-research-os.sqlite')}`);
+  });
+
 });
 
 describe('thesis lifecycle registry routes', () => {
