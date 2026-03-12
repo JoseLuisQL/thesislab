@@ -1,0 +1,7 @@
+Containerized LaTeX build executed for main.tex.
+Bibliography mode: unsupported.
+Bibliography status: unsupported.
+Working directory: ..
+Containerized LaTeX build skipped because bibliography preflight already determined the workflow cannot complete successfully.
+exit-status: 0
+latexmk: unsupported bibliography workflow detected; automatic bibliography run skipped.

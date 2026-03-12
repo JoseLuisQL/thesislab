@@ -4,7 +4,12 @@ CREATE TABLE `theses` (
 	`slug` text NOT NULL,
 	`degree_program` text NOT NULL,
 	`institution` text NOT NULL,
+	`policy_profile_id` text,
+	`openclaw_agent_id` text,
+	`openclaw_session_key` text,
 	`workspace_path` text NOT NULL,
+	`official_workspace_path` text,
+	`official_entrypoint` text,
 	`default_language` text NOT NULL,
 	`current_state` text NOT NULL,
 	`latest_status_at` text NOT NULL,
@@ -70,6 +75,8 @@ CREATE TABLE `workflow_packs` (
 	`description` text NOT NULL,
 	`status` text NOT NULL,
 	`current_step_id` text,
+	`openclaw_agent_id` text,
+	`openclaw_session_key` text,
 	`created_at` text DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW')) NOT NULL,
 	`updated_at` text DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW')) NOT NULL,
 	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade
@@ -236,6 +243,27 @@ CREATE TABLE `zotero_mappings` (
 	FOREIGN KEY (`normalized_node_id`) REFERENCES `normalized_nodes`(`id`) ON UPDATE no action ON DELETE set null,
 	FOREIGN KEY (`source_id`) REFERENCES `sources`(`id`) ON UPDATE no action ON DELETE set null
 );
+
+CREATE TABLE `citations` (
+	`id` text PRIMARY KEY NOT NULL,
+	`thesis_id` text NOT NULL,
+	`source_id` text,
+	`zotero_mapping_id` text,
+	`normalized_node_id` text,
+	`claim_id` text,
+	`citation_key` text NOT NULL,
+	`locator` text,
+	`style` text DEFAULT 'bibtex' NOT NULL,
+	`status` text DEFAULT 'draft' NOT NULL,
+	`created_at` text DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW')) NOT NULL,
+	`updated_at` text DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'NOW')) NOT NULL,
+	FOREIGN KEY (`thesis_id`) REFERENCES `theses`(`id`) ON UPDATE no action ON DELETE cascade,
+	FOREIGN KEY (`source_id`) REFERENCES `sources`(`id`) ON UPDATE no action ON DELETE set null,
+	FOREIGN KEY (`zotero_mapping_id`) REFERENCES `zotero_mappings`(`id`) ON UPDATE no action ON DELETE set null,
+	FOREIGN KEY (`normalized_node_id`) REFERENCES `normalized_nodes`(`id`) ON UPDATE no action ON DELETE set null,
+	FOREIGN KEY (`claim_id`) REFERENCES `claims`(`id`) ON UPDATE no action ON DELETE set null
+);
+CREATE UNIQUE INDEX `citations_thesis_key_idx` ON `citations` (`thesis_id`,`citation_key`);
 
 CREATE TABLE `policy_profiles` (
 	`id` text PRIMARY KEY NOT NULL,

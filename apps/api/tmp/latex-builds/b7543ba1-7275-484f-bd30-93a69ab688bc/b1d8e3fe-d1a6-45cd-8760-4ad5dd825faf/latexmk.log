@@ -1,0 +1,8 @@
+Containerized LaTeX build executed for main.tex.
+Bibliography mode: bibliography.
+Bibliography status: missing_inputs.
+Working directory: ..
+Containerized LaTeX build skipped because bibliography preflight already determined the workflow cannot complete successfully.
+exit-status: 0
+main.tex:5: ERROR: Missing bibliography file refs.bib.
+Latexmk: bibliography dependency refs.bib could not be resolved.

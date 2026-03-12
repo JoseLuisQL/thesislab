@@ -1,3 +1,5 @@
+import { createAgentRuntime } from '@thesis-research-os/runtime';
+
 // research-engine — source registration types and duplicate checking
 
 export type SourceIngestStatus = 'not_started' | 'queued' | 'succeeded' | 'degraded' | 'failed';
@@ -92,24 +94,24 @@ export interface ResearchAdapter {
   extractSources(url: string): Promise<Array<{ title: string; authors: string[]; doi: string | null; url: string }>>;
 }
 
-export class StubResearchAdapter implements ResearchAdapter {
+export class LocalResearchAdapter implements ResearchAdapter {
+  private readonly runtime = createAgentRuntime();
+
   async search(query: string): Promise<ResearchResult[]> {
-    console.warn(`[StubResearchAdapter] search("${query}") — browser research not configured. Install Playwright for real browser research.`);
-    return [];
+    return this.runtime.searchAcademic(query);
   }
 
   async fetchPage(url: string): Promise<{ title: string; text: string; html: string }> {
-    console.warn(`[StubResearchAdapter] fetchPage("${url}") — browser research not configured.`);
-    return { title: '', text: '', html: '' };
+    return this.runtime.fetchPage(url);
   }
 
   async extractSources(url: string): Promise<Array<{ title: string; authors: string[]; doi: string | null; url: string }>> {
-    console.warn(`[StubResearchAdapter] extractSources("${url}") — browser research not configured.`);
-    return [];
+    return this.runtime.extractSources(url);
   }
 }
 
-export function createResearchAdapter(): ResearchAdapter {
-  return new StubResearchAdapter();
-}
+export class OpenClawResearchAdapter extends LocalResearchAdapter {}
 
+export function createResearchAdapter(): ResearchAdapter {
+  return new LocalResearchAdapter();
+}

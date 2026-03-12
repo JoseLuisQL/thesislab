@@ -51,6 +51,7 @@ describe('domain repository boundaries', () => {
       'academicQaRuns',
       'buildRuns',
       'checkpoints',
+      'citations',
       'claimEvidenceLinks',
       'claims',
       'complianceIssues',

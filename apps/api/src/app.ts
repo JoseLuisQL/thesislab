@@ -15,10 +15,14 @@ import {
   type CreateClaimInput,
   type CreateWorkflowTaskCheckpointInput,
   type CreateFeedbackInput,
+  type CreateCitationInput,
   type CreateEvidenceFragmentInput,
   type CreateIntakeJobInput,
+  type CreatePolicyProfileInput,
+  type ResearchCaptureInput,
   type CreateZoteroMappingInput,
   type ListZoteroItemsInput,
+  type UpdateOpenClawAssignmentInput,
   ClaimEvidenceScopeError,
   ClaimEvidenceLinkNotFoundError,
   ClaimNotFoundError,
@@ -52,6 +56,11 @@ const createThesisSchema = z.object({
   degreeProgram: z.string().trim().min(1),
   institution: z.string().trim().min(1),
   workspacePath: z.string().trim().min(1),
+  policyProfileId: z.string().trim().min(1).nullable().optional(),
+  openClawAgentId: z.string().trim().min(1).nullable().optional(),
+  openClawSessionKey: z.string().trim().min(1).nullable().optional(),
+  officialWorkspacePath: z.string().trim().min(1).nullable().optional(),
+  officialEntrypoint: z.string().trim().min(1).nullable().optional(),
   defaultLanguage: z.string().trim().min(2).optional(),
 });
 
@@ -59,6 +68,11 @@ const updateThesisSchema = createThesisSchema.partial().refine(
   (payload) => Object.keys(payload).length > 0,
   'At least one field must be provided.',
 );
+
+const openClawAssignmentSchema = z.object({
+  agentId: z.string().trim().min(1).nullable().optional(),
+  sessionKey: z.string().trim().min(1).nullable().optional(),
+}).refine((payload) => Object.keys(payload).length > 0, 'At least one field must be provided.');
 
 const transitionThesisSchema = z.object({
   state: z.enum(['draft', 'intake', 'active', 'blocked', 'review', 'completed']),
@@ -79,7 +93,7 @@ const createCheckpointSchema = z.object({
 });
 
 const createFeedbackSchema = z.object({
-  sourceType: z.enum(['user', 'system', 'qa', 'compliance']),
+  sourceType: z.enum(['user', 'system', 'qa', 'compliance', 'advisor']),
   body: z.string().trim().min(1),
   summary: z.string().trim().min(1).nullable().optional(),
   recordedAt: z.string().datetime().optional(),
@@ -223,37 +237,67 @@ const refreshZoteroMappingSchema = z.object({
   itemKey: z.string().trim().min(1).nullable().optional(),
 });
 
+const createCitationSchema = z.object({
+  sourceId: z.string().trim().min(1).nullable().optional(),
+  zoteroMappingId: z.string().trim().min(1).nullable().optional(),
+  normalizedNodeId: z.string().trim().min(1).nullable().optional(),
+  claimId: z.string().trim().min(1).nullable().optional(),
+  citationKey: z.string().trim().min(1),
+  locator: z.string().trim().min(1).nullable().optional(),
+  style: z.string().trim().min(1).optional(),
+  status: z.enum(['draft', 'linked', 'validated']).optional(),
+});
+
+const researchSearchSchema = z.object({
+  query: z.string().trim().min(1),
+});
+
+const researchFetchSchema = z.object({
+  url: z.string().url(),
+});
+
+const researchCaptureSchema = z.object({
+  source: registerSourceSchema,
+  evidence: createEvidenceFragmentSchema.omit({ sourceId: true }).optional(),
+  claim: createClaimSchema.optional(),
+  citation: createCitationSchema.omit({ sourceId: true, claimId: true }).optional(),
+});
+
+const mcpToolCallSchema = z.object({
+  toolName: z.string().trim().min(1),
+  args: z.record(z.string(), z.unknown()).optional(),
+});
+
+const policyRuleDefinitionSchema = z.object({
+  id: z.string().trim().min(1),
+  title: z.string().trim().min(1),
+  description: z.string().trim().min(1),
+  category: z.enum(['structure', 'metadata']),
+  severity: z.enum(['warning', 'violation']),
+  remediation: z.string().trim().min(1),
+  requiredSectionTitle: z.string().trim().min(1).optional(),
+  minimumDocumentChildren: z.number().int().positive().optional(),
+});
+
+const createPolicyProfileSchema = z.object({
+  id: z.string().trim().min(1).optional(),
+  institution: z.string().trim().min(1),
+  faculty: z.string().trim().min(1),
+  version: z.string().trim().min(1),
+  title: z.string().trim().min(1),
+  requiredSections: z.array(z.string().trim().min(1)).min(1),
+  rules: z.array(policyRuleDefinitionSchema).min(1),
+  isActive: z.boolean().optional(),
+});
+
 export function resolveRuntimeDatabaseUrl() {
-  const configuredDatabaseUrl = process.env.DATABASE_URL?.trim();
-  const hostRepoRoot = process.env.HOST_REPO_ROOT?.trim();
-  const runtimeDatabaseUrl = `file:${path.resolve(process.cwd(), 'data', 'thesis-research-os.sqlite')}`;
-
-  if (configuredDatabaseUrl) {
-    return configuredDatabaseUrl;
-  }
-
-  const runtimeRelativeDefault = path.resolve(process.cwd(), 'data', 'thesis-research-os.sqlite');
-  const packageDefault = getDatabaseFilePath();
-  const packageDefaultUrl = `file:${packageDefault}`;
-
-  if (hostRepoRoot) {
-    const hostRepoDataPath = path.resolve(hostRepoRoot, 'data', 'thesis-research-os.sqlite');
-
-    if (runtimeRelativeDefault === hostRepoDataPath) {
-      return packageDefaultUrl;
-    }
-  }
-
-  if (runtimeRelativeDefault === packageDefault) {
-    return packageDefaultUrl;
-  }
-
-  return runtimeDatabaseUrl;
+  const databaseFilePath = getDatabaseFilePath(process.env.DATABASE_URL);
+  return `file:${databaseFilePath}`;
 }
 
 export function createApp() {
   const testDatabaseUrl = resolveRuntimeDatabaseUrl();
-  const app = Fastify({ logger: true });
+  const app = Fastify({ logger: !process.env.VITEST });
   let schemaReady: Promise<void> | null = null;
   let thesisLifecycle: ReturnType<typeof createThesisLifecycleService> | null = null;
 
@@ -465,6 +509,105 @@ export function createApp() {
 
   app.get('/status/capabilities', async () => buildLocalFirstStatusPayload());
 
+  app.get('/openclaw/status', async () => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const status = await (await getThesisLifecycle()).service.getOpenClawStatus();
+    return { ok: true, status };
+  });
+
+  app.get('/openclaw/agents', async () => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const status = await (await getThesisLifecycle()).service.getOpenClawStatus();
+    return { ok: true, agents: status.agents };
+  });
+
+  app.post('/mcp/tools/call', async (request, reply) => {
+    const payload = mcpToolCallSchema.parse(request.body ?? {});
+    const args = payload.args ?? {};
+
+    if (payload.toolName === 'zotero.list_libraries') {
+      const { createMcpBridgeConnector } = await import('@thesis-research-os/zotero-bridge');
+      const connector = createMcpBridgeConnector();
+      const libraries = await Promise.resolve(connector.listLibraries());
+      return reply.status(200).send({ libraries });
+    }
+
+    if (payload.toolName === 'zotero.list_collections') {
+      const { createMcpBridgeConnector } = await import('@thesis-research-os/zotero-bridge');
+      const connector = createMcpBridgeConnector();
+      const collections = await Promise.resolve(connector.listCollections({
+        libraryKey: typeof args.libraryKey === 'string' ? args.libraryKey : null,
+      }));
+      return reply.status(200).send({ collections });
+    }
+
+    if (payload.toolName === 'zotero.list_items') {
+      const { createMcpBridgeConnector } = await import('@thesis-research-os/zotero-bridge');
+      const connector = createMcpBridgeConnector();
+      const items = await Promise.resolve(connector.listItems({
+        libraryKey: typeof args.libraryKey === 'string' ? args.libraryKey : null,
+        collectionKey: typeof args.collectionKey === 'string' ? args.collectionKey : null,
+      }));
+      return reply.status(200).send({ items });
+    }
+
+    if (payload.toolName === 'zotero.search_items') {
+      const { createMcpBridgeConnector } = await import('@thesis-research-os/zotero-bridge');
+      const connector = createMcpBridgeConnector();
+      const items = await Promise.resolve(connector.searchItems({
+        query: typeof args.query === 'string' ? args.query : '',
+        libraryKey: typeof args.libraryKey === 'string' ? args.libraryKey : null,
+        collectionKey: typeof args.collectionKey === 'string' ? args.collectionKey : null,
+      }));
+      return reply.status(200).send({ items });
+    }
+
+    if (payload.toolName === 'zotero.resolve_mapping') {
+      const { createMcpBridgeConnector } = await import('@thesis-research-os/zotero-bridge');
+      const connector = createMcpBridgeConnector();
+      const [libraries, collections, items] = await Promise.all([
+        Promise.resolve(connector.listLibraries()),
+        Promise.resolve(connector.listCollections({
+          libraryKey: typeof args.libraryId === 'string' ? args.libraryId : null,
+        })),
+        Promise.resolve(connector.listItems({
+          libraryKey: typeof args.libraryId === 'string' ? args.libraryId : null,
+          collectionKey: null,
+        })),
+      ]);
+
+      const library = libraries.find((entry) => entry.id === args.libraryId || entry.key === args.libraryId) ?? null;
+      const collection = typeof args.collectionKey === 'string'
+        ? collections.find((entry) => entry.key === args.collectionKey)
+        : null;
+      const item = typeof args.itemKey === 'string'
+        ? items.find((entry) => entry.key === args.itemKey)
+        : null;
+      const missing = [
+        library ? null : 'library',
+        typeof args.collectionKey === 'string' && !collection ? 'collection' : null,
+        typeof args.itemKey === 'string' && !item ? 'item' : null,
+      ].filter((value): value is string => value !== null);
+
+      return reply.status(200).send({
+        connectorStatus: missing.length === 0 ? 'ready' : 'degraded',
+        normalizedData: {
+          library,
+          collection: collection ?? null,
+          item: item ?? null,
+          connectorMessage: missing.length === 0 ? null : `Zotero connector could not resolve ${missing.join(', ')} for the requested mapping refresh.`,
+          connectorCode: missing.length === 0 ? null : 'ZOTERO_CONNECTOR_RESOLUTION_FAILED',
+        },
+      });
+    }
+
+    return reply.status(404).send({
+      ok: false,
+      code: 'MCP_TOOL_NOT_FOUND',
+      message: `Unsupported MCP tool ${payload.toolName}.`,
+    });
+  });
+
   app.get('/theses/:thesisId/status/capabilities', async (request) => {
     process.env.DATABASE_URL = testDatabaseUrl;
     const thesisId = (request.params as { thesisId: string }).thesisId;
@@ -607,11 +750,35 @@ export function createApp() {
     });
   });
 
+  app.post('/theses/:thesisId/zotero/sync-bibliography', async (request, reply) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const sync = await (await getThesisLifecycle()).service.syncZoteroBibliography(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return reply.status(201).send({ ok: true, sync });
+  });
+
   app.get('/policy-profiles/active', async () => {
     process.env.DATABASE_URL = testDatabaseUrl;
     const policyProfile = await (await getThesisLifecycle()).service.getActivePolicyProfile();
 
     return { ok: true, policyProfile };
+  });
+
+  app.get('/policy-profiles', async () => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const policyProfiles = await (await getThesisLifecycle()).service.listPolicyProfiles();
+
+    return { ok: true, policyProfiles };
+  });
+
+  app.post('/policy-profiles', async (request, reply) => {
+    const payload = createPolicyProfileSchema.parse(request.body) as CreatePolicyProfileInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const policyProfile = await (await getThesisLifecycle()).service.createPolicyProfile(payload);
+
+    return reply.status(201).send({ ok: true, policyProfile });
   });
 
   app.post('/theses/:thesisId/zotero-mappings', async (request, reply) => {
@@ -691,6 +858,26 @@ export function createApp() {
     );
 
     return { ok: true, thesis };
+  });
+
+  app.get('/theses/:thesisId/openclaw-assignment', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const assignment = await (await getThesisLifecycle()).service.getOpenClawAssignment(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, assignment };
+  });
+
+  app.patch('/theses/:thesisId/openclaw-assignment', async (request) => {
+    const payload = openClawAssignmentSchema.parse(request.body ?? {}) as UpdateOpenClawAssignmentInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const assignment = await (await getThesisLifecycle()).service.updateOpenClawAssignment(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return { ok: true, assignment };
   });
 
   app.post('/theses/:thesisId/state', async (request) => {
@@ -840,6 +1027,19 @@ export function createApp() {
     return { ok: true, workflowPack };
   });
 
+  app.patch('/theses/:thesisId/workflow-packs/:workflowPackId/openclaw-assignment', async (request) => {
+    const payload = openClawAssignmentSchema.parse(request.body ?? {}) as UpdateOpenClawAssignmentInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; workflowPackId: string };
+    const workflowPack = await (await getThesisLifecycle()).service.updateWorkflowPackOpenClawAssignment(
+      params.thesisId,
+      params.workflowPackId,
+      payload,
+    );
+
+    return { ok: true, workflowPack };
+  });
+
   app.get('/theses/:thesisId/evidence-context-setup', async (request) => {
     process.env.DATABASE_URL = testDatabaseUrl;
     const setup = await (await getThesisLifecycle()).service.getEvidenceContextSetup(
@@ -860,6 +1060,39 @@ export function createApp() {
     return reply.status(result.duplicate ? 200 : 201).send({ ok: true, source: result.source, duplicate: result.duplicate });
   });
 
+  app.post('/theses/:thesisId/research/search', async (request, reply) => {
+    const payload = researchSearchSchema.parse(request.body);
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const results = await (await getThesisLifecycle()).service.searchResearch(
+      (request.params as { thesisId: string }).thesisId,
+      payload.query,
+    );
+
+    return reply.status(200).send({ ok: true, results });
+  });
+
+  app.post('/theses/:thesisId/research/fetch', async (request, reply) => {
+    const payload = researchFetchSchema.parse(request.body);
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const page = await (await getThesisLifecycle()).service.fetchResearchPage(
+      (request.params as { thesisId: string }).thesisId,
+      payload.url,
+    );
+
+    return reply.status(200).send({ ok: true, page });
+  });
+
+  app.post('/theses/:thesisId/research/capture', async (request, reply) => {
+    const payload = researchCaptureSchema.parse(request.body) as ResearchCaptureInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const captured = await (await getThesisLifecycle()).service.captureResearchArtifact(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, captured });
+  });
+
   app.get('/theses/:thesisId/sources', async (request) => {
     process.env.DATABASE_URL = testDatabaseUrl;
     const params = request.params as { thesisId: string };
@@ -877,7 +1110,38 @@ export function createApp() {
     return { ok: true, source };
   });
 
+  app.post('/theses/:thesisId/citations', async (request, reply) => {
+    const payload = createCitationSchema.parse(request.body) as CreateCitationInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const citation = await (await getThesisLifecycle()).service.createCitation(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, citation });
+  });
+
+  app.get('/theses/:thesisId/citations', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const citations = await (await getThesisLifecycle()).service.listCitations(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, citations };
+  });
+
   app.post('/theses/:thesisId/evidence-fragments', async (request, reply) => {
+    const payload = createEvidenceFragmentSchema.parse(request.body) as CreateEvidenceFragmentInput;
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const evidenceFragment = await (await getThesisLifecycle()).service.createEvidenceFragment(
+      (request.params as { thesisId: string }).thesisId,
+      payload,
+    );
+
+    return reply.status(201).send({ ok: true, evidenceFragment });
+  });
+
+  app.post('/theses/:thesisId/evidence', async (request, reply) => {
     const payload = createEvidenceFragmentSchema.parse(request.body) as CreateEvidenceFragmentInput;
     process.env.DATABASE_URL = testDatabaseUrl;
     const evidenceFragment = await (await getThesisLifecycle()).service.createEvidenceFragment(
@@ -894,7 +1158,16 @@ export function createApp() {
       (request.params as { thesisId: string }).thesisId,
     );
 
-    return { ok: true, evidenceFragments };
+    return { ok: true, evidenceFragments, fragments: evidenceFragments };
+  });
+
+  app.get('/theses/:thesisId/evidence', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const evidenceFragments = await (await getThesisLifecycle()).service.listEvidenceFragments(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, evidenceFragments, fragments: evidenceFragments };
   });
 
   app.get('/theses/:thesisId/evidence-fragments/:evidenceFragmentId', async (request) => {
@@ -1035,6 +1308,26 @@ export function createApp() {
     const nodes = await (await getThesisLifecycle()).service.listNormalizedNodes(params.thesisId, params.intakeJobId);
 
     return { ok: true, nodes };
+  });
+
+  app.get('/theses/:thesisId/latex/structure', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const structure = await (await getThesisLifecycle()).service.getLatexStructure(
+      (request.params as { thesisId: string }).thesisId,
+    );
+
+    return { ok: true, structure };
+  });
+
+  app.get('/theses/:thesisId/latex/sections/:normalizedNodeId', async (request) => {
+    process.env.DATABASE_URL = testDatabaseUrl;
+    const params = request.params as { thesisId: string; normalizedNodeId: string };
+    const section = await (await getThesisLifecycle()).service.getLatexSectionPreview(
+      params.thesisId,
+      params.normalizedNodeId,
+    );
+
+    return { ok: true, section };
   });
 
   app.post('/theses/:thesisId/latex/edits', async (request, reply) => {

@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,7 +11,7 @@ import { policyProfiles, theses } from './schema.js';
 
 function createTempDatabaseUrl(prefix: string) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  return `file:${path.relative('/root/thesislab', path.join(dir, 'db.sqlite'))}`;
+  return `file:${path.join(dir, 'db.sqlite')}`;
 }
 
 describe('schema migrations', () => {
@@ -33,6 +32,7 @@ describe('schema migrations', () => {
         'academic_qa_runs',
         'build_runs',
         'checkpoints',
+        'citations',
         'claim_evidence_links',
         'claims',
         'compliance_issues',
@@ -124,9 +124,8 @@ describe('schema migrations', () => {
     connection.sqlite.close();
   });
 
-  it('rejects orphaned cross-entity references through enforced foreign keys', () => {
+  it('rejects orphaned cross-entity references through enforced foreign keys', async () => {
     const databaseUrl = createTempDatabaseUrl('thesis-db-relations-');
-    const databasePath = path.resolve('/root/thesislab', databaseUrl.slice('file:'.length));
     const migrationPaths = [
       path.resolve(import.meta.dirname, '../drizzle/0000_domain_core.sql'),
     ];
@@ -149,6 +148,7 @@ describe('schema migrations', () => {
       "INSERT INTO academic_qa_runs (id, thesis_id, status, assessed_scope_json, skipped_scope_json, summary_json, started_at, completed_at) VALUES ('qa-run-1', 'thesis-1', 'completed', '{}', '{}', '{}', '2026-03-09T00:24:00.000Z', '2026-03-09T00:25:00.000Z')",
       "INSERT INTO academic_qa_issues (id, thesis_id, academic_qa_run_id, claim_id, normalized_node_id, category, severity, message, rationale, remediation, triggering_condition) VALUES ('qa-issue-1', 'thesis-1', 'qa-run-1', 'claim-1', 'node-2', 'evidence-gap', 'warning', 'Need more evidence', 'Only one source attached', 'Attach more sources', 'low-support')",
       "INSERT INTO zotero_mappings (id, thesis_id, normalized_node_id, source_id, scope, library_id, collection_key, item_key, normalized_data_json, connector_status, last_synced_at) VALUES ('zotero-1', 'thesis-1', 'node-2', 'source-1', 'thesis', 'library-1', 'collection-1', 'item-1', '{}', 'mocked', '2026-03-09T00:15:00.000Z')",
+      "INSERT INTO citations (id, thesis_id, source_id, zotero_mapping_id, normalized_node_id, claim_id, citation_key, locator, style, status) VALUES ('citation-1', 'thesis-1', 'source-1', 'zotero-1', 'node-2', 'claim-1', 'ada2024', 'p. 4', 'bibtex', 'linked')",
       "INSERT INTO build_runs (id, thesis_id, checkpoint_id, status, engine, artifact_path, diagnostics_json, bibliography_status, started_at, completed_at, is_latest_successful) VALUES ('build-1', 'thesis-1', 'checkpoint-1', 'success', 'latexmk', '/tmp/output.pdf', '{}', 'ok', '2026-03-09T00:20:00.000Z', '2026-03-09T00:21:00.000Z', 1)",
     ];
 
@@ -158,49 +158,30 @@ describe('schema migrations', () => {
       "INSERT INTO zotero_mappings (id, thesis_id, normalized_node_id, source_id, scope, library_id, collection_key, item_key, normalized_data_json, connector_status, last_synced_at) VALUES ('zotero-invalid', 'thesis-1', 'missing-node', 'source-1', 'thesis', 'library-1', NULL, NULL, '{}', 'mocked', NULL)",
       "INSERT INTO compliance_issues (id, thesis_id, compliance_run_id, policy_profile_id, rule_id, normalized_node_id, severity, message, remediation, disposition) VALUES ('compliance-issue-invalid', 'thesis-1', 'compliance-run-1', 'policy-1', 'rule-1', 'missing-node', 'warning', 'Broken issue', NULL, 'warning')",
       "INSERT INTO academic_qa_issues (id, thesis_id, academic_qa_run_id, claim_id, normalized_node_id, category, severity, message, rationale, remediation, triggering_condition) VALUES ('qa-issue-invalid-claim', 'thesis-1', 'qa-run-1', 'missing-claim', 'node-2', 'evidence-gap', 'warning', 'Broken qa issue', 'Missing claim', NULL, 'low-support')",
+      "INSERT INTO citations (id, thesis_id, source_id, zotero_mapping_id, normalized_node_id, claim_id, citation_key, locator, style, status) VALUES ('citation-invalid', 'thesis-1', 'source-1', 'missing-zotero', 'node-2', 'claim-1', 'broken2026', NULL, 'bibtex', 'draft')",
       "INSERT INTO build_runs (id, thesis_id, checkpoint_id, status, engine, artifact_path, diagnostics_json, bibliography_status, started_at, completed_at, is_latest_successful) VALUES ('build-invalid', 'thesis-1', 'missing-checkpoint', 'failed', 'latexmk', NULL, '{}', 'unknown', '2026-03-09T00:30:00.000Z', NULL, 0)",
       "INSERT INTO workflow_steps (id, thesis_id, workflow_pack_id, title, description, status, step_order) VALUES ('step-invalid-pack', 'thesis-1', 'missing-pack', 'Broken workflow step', 'Should fail because the pack does not exist', 'pending', 2)",
     ];
 
-    const pythonScript = String.raw`
-import json
-import sqlite3
-import sys
+    const migrationSql = migrationPaths
+      .map((migrationPath) => fs.readFileSync(migrationPath, 'utf8').replaceAll('--> statement-breakpoint', ';'))
+      .join('\n');
+    const connection = createDatabaseConnection(databaseUrl);
 
-migration_sql = ''
-for migration_path in json.loads(sys.argv[2]):
-    with open(migration_path, 'r', encoding='utf-8') as handle:
-        migration_sql += handle.read().replace('--> statement-breakpoint', ';') + '\n'
+    await connection.sqlite.execute('PRAGMA foreign_keys = ON');
+    await connection.sqlite.executeMultiple(migrationSql);
 
-seed_sql = json.loads(sys.argv[3])
-invalid_sql = json.loads(sys.argv[4])
+    for (const statement of seedSql) {
+      await connection.sqlite.execute(statement);
+    }
 
-conn = sqlite3.connect(sys.argv[1])
-conn.execute('PRAGMA foreign_keys = ON')
-conn.executescript(migration_sql)
+    for (const statement of invalidSql) {
+      await expect(connection.sqlite.execute(statement)).rejects.toMatchObject({
+        code: 'SQLITE_CONSTRAINT_FOREIGNKEY',
+      });
+    }
 
-for statement in seed_sql:
-    conn.execute(statement)
-
-for statement in invalid_sql:
-    try:
-        conn.execute(statement)
-    except sqlite3.IntegrityError as exc:
-        if 'FOREIGN KEY constraint failed' not in str(exc):
-            raise AssertionError(f'Unexpected integrity error: {exc}') from exc
-    else:
-        raise AssertionError(f'Expected foreign key failure for SQL: {statement}')
-
-conn.close()
-`;
-
-    expect(() => {
-      execFileSync(
-        'python3',
-        ['-c', pythonScript, databasePath, JSON.stringify(migrationPaths), JSON.stringify(seedSql), JSON.stringify(invalidSql)],
-        { stdio: 'pipe' },
-      );
-    }).not.toThrow();
+    connection.sqlite.close();
   });
 
   it('keeps the base migration aligned with current schema foreign keys and protects fresh databases without follow-up migrations', async () => {
@@ -219,6 +200,7 @@ conn.close()
       'academic_qa_runs',
       'build_runs',
       'checkpoints',
+      'citations',
       'claim_evidence_links',
       'claims',
       'compliance_issues',
@@ -268,6 +250,13 @@ conn.close()
       ]],
       ['checkpoints', [
         'thesis_id -> theses -> id -> cascade',
+      ]],
+      ['citations', [
+        'claim_id -> claims -> id -> set null',
+        'normalized_node_id -> normalized_nodes -> id -> set null',
+        'source_id -> sources -> id -> set null',
+        'thesis_id -> theses -> id -> cascade',
+        'zotero_mapping_id -> zotero_mappings -> id -> set null',
       ]],
       ['claim_evidence_links', [
         'claim_id -> claims -> id -> cascade',
@@ -369,6 +358,12 @@ conn.close()
       INSERT INTO claims (id, thesis_id, normalized_node_id, text, status, support_summary, evidence_ordering_json)
       VALUES ('claim-base-1', 'thesis-base-1', 'node-base-2', 'A defensible claim', 'draft', 'Needs support', '{"evidenceFragmentIdOrder":[]}');
 
+      INSERT INTO zotero_mappings (id, thesis_id, normalized_node_id, source_id, scope, library_id, collection_key, item_key, normalized_data_json, connector_status, last_synced_at)
+      VALUES ('zotero-base-1', 'thesis-base-1', 'node-base-2', 'source-base-1', 'thesis', 'library-1', 'collection-1', 'item-1', '{}', 'mocked', '2026-03-09T00:15:00.000Z');
+
+      INSERT INTO citations (id, thesis_id, source_id, zotero_mapping_id, normalized_node_id, claim_id, citation_key, locator, style, status)
+      VALUES ('citation-base-1', 'thesis-base-1', 'source-base-1', 'zotero-base-1', 'node-base-2', 'claim-base-1', 'base2026', 'p. 4', 'bibtex', 'linked');
+
       INSERT INTO compliance_runs (id, thesis_id, policy_profile_id, status, summary_json, evaluated_rule_count, warning_rule_count, skipped_rule_count, started_at, completed_at)
       VALUES ('compliance-run-base-1', 'thesis-base-1', 'policy-base-1', 'completed', '{}', 1, 0, 0, '2026-03-09T00:22:00.000Z', '2026-03-09T00:23:00.000Z');
 
@@ -394,6 +389,11 @@ conn.close()
     await expect(connection.sqlite.execute(`
       INSERT INTO zotero_mappings (id, thesis_id, normalized_node_id, source_id, scope, library_id, collection_key, item_key, normalized_data_json, connector_status, last_synced_at)
       VALUES ('zotero-invalid', 'thesis-base-1', 'missing-node', 'source-base-1', 'thesis', 'library-1', NULL, NULL, '{}', 'mocked', NULL)
+    `)).rejects.toThrow(/FOREIGN KEY constraint failed/);
+
+    await expect(connection.sqlite.execute(`
+      INSERT INTO citations (id, thesis_id, source_id, zotero_mapping_id, normalized_node_id, claim_id, citation_key, locator, style, status)
+      VALUES ('citation-invalid', 'thesis-base-1', 'source-base-1', 'missing-zotero', 'node-base-2', 'claim-base-1', 'broken-base', NULL, 'bibtex', 'draft')
     `)).rejects.toThrow(/FOREIGN KEY constraint failed/);
 
     await expect(connection.sqlite.execute(`
@@ -424,17 +424,19 @@ conn.close()
     connection.sqlite.close();
   });
 
-  it('records the claim evidence ordering migration in the Drizzle journal sequence', async () => {
+  it('records the latest domain migrations in the Drizzle journal sequence', async () => {
     const journalPath = path.resolve(import.meta.dirname, '../drizzle/meta/_journal.json');
     const journal = JSON.parse(fs.readFileSync(journalPath, 'utf8')) as {
       entries?: Array<{ idx: number; tag: string }>;
     };
 
-    expect(journal.entries).toEqual([
+    expect(journal.entries).toEqual(expect.arrayContaining([
       expect.objectContaining({ idx: 0, tag: '0000_domain_core' }),
       expect.objectContaining({ idx: 1, tag: '0001_unknown_komodo' }),
       expect.objectContaining({ idx: 2, tag: '0002_claim_evidence_ordering_json' }),
-    ]);
+      expect.objectContaining({ idx: 3, tag: '0003_policy_workspace_and_citations' }),
+      expect.objectContaining({ idx: 4, tag: '0004_openclaw_assignments' }),
+    ]));
   });
 
   it('bootstraps a fresh SQLite database through the full migration journal without duplicate table errors', async () => {
@@ -444,14 +446,14 @@ conn.close()
     const journalRows = await inspectMigrationJournal(databaseUrl);
 
     expect(result.filePath).toContain('db.sqlite');
-    expect(journalRows).toHaveLength(3);
-    expect(journalRows.map((row) => row.createdAt)).toEqual([0, 1, 2]);
+    expect(journalRows).toHaveLength(5);
+    expect(journalRows.map((row) => row.createdAt)).toEqual([0, 1, 2, 3, 4]);
 
     const connection = createDatabaseConnection(databaseUrl);
     const claimsTables = await connection.sqlite.execute("select name from sqlite_master where type='table' and name='claims'");
     connection.sqlite.close();
 
-    expect(claimsTables.rows).toEqual([]);
+    expect(claimsTables.rows.map((row) => String(row.name))).toEqual(['claims']);
   });
 
   it('repairs a legacy SQLite database by seeding the migration journal without reapplying duplicate base schema SQL', async () => {
@@ -469,8 +471,8 @@ conn.close()
     const journalRows = await inspectMigrationJournal(databaseUrl);
 
     expect(result.filePath).toContain('db.sqlite');
-    expect(journalRows).toHaveLength(3);
-    expect(journalRows.map((row) => row.createdAt)).toEqual([0, 1, 2]);
+    expect(journalRows).toHaveLength(5);
+    expect(journalRows.map((row) => row.createdAt)).toEqual([0, 1, 2, 3, 4]);
 
     const verifyConnection = createDatabaseConnection(databaseUrl);
     const thesesCount = await verifyConnection.sqlite.execute('select count(*) as count from theses');
@@ -498,7 +500,7 @@ conn.close()
     const claimsCount = await verifyConnection.sqlite.execute('select count(*) as count from claims');
     verifyConnection.sqlite.close();
 
-    expect(journalRows).toHaveLength(3);
+    expect(journalRows).toHaveLength(5);
     expect(Number(claimsCount.rows[0]?.count ?? 0)).toBe(0);
     expect(claimsInfo.rows.map((row) => String(row.name))).not.toContain('evidence_ordering_json');
   });

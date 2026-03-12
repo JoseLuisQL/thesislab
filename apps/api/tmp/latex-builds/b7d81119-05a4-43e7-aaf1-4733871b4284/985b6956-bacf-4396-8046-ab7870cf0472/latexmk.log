@@ -1,0 +1,6 @@
+Containerized LaTeX build executed for main.tex.
+Bibliography mode: biblatex.
+Bibliography status: ready.
+Working directory: ..
+spawn-error: spawnSync C:\Proyectos\thesislab-1\.factory\bin\doc-tool.sh EFTYPE
+exit-status: null

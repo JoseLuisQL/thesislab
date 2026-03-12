@@ -250,7 +250,34 @@ export type ZoteroConnector = {
 };
 
 export function createZoteroConnector(): ZoteroConnector {
-  const mode = resolveZoteroConnectorMode();
+  return createZoteroConnectorForMode(resolveZoteroConnectorMode());
+}
+
+export function resolveZoteroMcpConnectorMode(): ZoteroConnectorMode {
+  const overrideMode = (typeof process !== 'undefined' ? process.env?.ZOTERO_MCP_CONNECTOR_MODE : undefined)?.trim() || '';
+  switch (overrideMode) {
+    case 'mock':
+    case 'test':
+    case 'live':
+    case 'local':
+      return overrideMode;
+    default:
+      if ((typeof process !== 'undefined' ? process.env?.ZOTERO_LOCAL_URL : undefined)?.trim()) {
+        return 'local';
+      }
+      if ((typeof process !== 'undefined' ? process.env?.ZOTERO_API_KEY : undefined)?.trim()
+        && (typeof process !== 'undefined' ? process.env?.ZOTERO_USER_ID : undefined)?.trim()) {
+        return 'live';
+      }
+      return DEFAULT_ZOTERO_CONNECTOR_MODE;
+  }
+}
+
+export function createMcpBridgeConnector(): ZoteroConnector {
+  return createZoteroConnectorForMode(resolveZoteroMcpConnectorMode());
+}
+
+export function createZoteroConnectorForMode(mode: ZoteroConnectorMode): ZoteroConnector {
   const apiKey = (typeof process !== 'undefined' ? process.env?.ZOTERO_API_KEY : undefined)?.trim();
   const userId = (typeof process !== 'undefined' ? process.env?.ZOTERO_USER_ID : undefined)?.trim();
 
@@ -332,4 +359,3 @@ function createMockConnector(mode: ZoteroConnectorMode): ZoteroConnector {
         .sort((a, b) => a.title.localeCompare(b.title)),
   };
 }
-

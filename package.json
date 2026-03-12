@@ -4,12 +4,12 @@
   "version": "0.1.0",
   "packageManager": "pnpm@10.6.5",
   "scripts": {
-    "build": "pnpm --filter @thesis-research-os/shared build && pnpm --filter @thesis-research-os/db build && pnpm --filter @thesis-research-os/api build && pnpm --filter @thesis-research-os/web build",
+    "build": "pnpm --filter @thesis-research-os/shared build && pnpm --filter @thesis-research-os/zotero-bridge build && pnpm --filter @thesis-research-os/runtime build && pnpm --filter @thesis-research-os/research-engine build && pnpm --filter @thesis-research-os/db build && pnpm --filter @thesis-research-os/api build && pnpm --filter @thesis-research-os/web build",
     "dev:api": "pnpm --filter @thesis-research-os/api dev",
     "dev:web": "pnpm --filter @thesis-research-os/web dev",
-    "lint": "pnpm --filter @thesis-research-os/shared build && pnpm --filter @thesis-research-os/shared lint && pnpm --filter @thesis-research-os/db lint && pnpm --filter @thesis-research-os/api lint && pnpm --filter @thesis-research-os/web lint",
-    "test": "pnpm -r test",
-    "test:ci": "pnpm -r test:ci",
-    "typecheck": "pnpm --filter @thesis-research-os/shared build && pnpm --filter @thesis-research-os/shared typecheck && pnpm --filter @thesis-research-os/db typecheck && pnpm --filter @thesis-research-os/api typecheck && pnpm --filter @thesis-research-os/web typecheck"
+    "lint": "pnpm --filter @thesis-research-os/shared build && pnpm --filter @thesis-research-os/zotero-bridge build && pnpm --filter @thesis-research-os/runtime build && pnpm --filter @thesis-research-os/research-engine build && pnpm --filter @thesis-research-os/shared lint && pnpm --filter @thesis-research-os/zotero-bridge lint && pnpm --filter @thesis-research-os/runtime lint && pnpm --filter @thesis-research-os/research-engine lint && pnpm --filter @thesis-research-os/db lint && pnpm --filter @thesis-research-os/api lint && pnpm --filter @thesis-research-os/web lint",
+    "test": "pnpm --filter @thesis-research-os/shared test && pnpm --filter @thesis-research-os/db test && pnpm --filter @thesis-research-os/web test && pnpm --filter @thesis-research-os/api test",
+    "test:ci": "pnpm --filter @thesis-research-os/shared test:ci && pnpm --filter @thesis-research-os/db test:ci && pnpm --filter @thesis-research-os/web test:ci && pnpm --filter @thesis-research-os/api test:ci",
+    "typecheck": "pnpm --filter @thesis-research-os/shared build && pnpm --filter @thesis-research-os/zotero-bridge build && pnpm --filter @thesis-research-os/runtime build && pnpm --filter @thesis-research-os/research-engine build && pnpm --filter @thesis-research-os/shared typecheck && pnpm --filter @thesis-research-os/zotero-bridge typecheck && pnpm --filter @thesis-research-os/runtime typecheck && pnpm --filter @thesis-research-os/research-engine typecheck && pnpm --filter @thesis-research-os/db typecheck && pnpm --filter @thesis-research-os/api typecheck && pnpm --filter @thesis-research-os/web typecheck"
   }
 }

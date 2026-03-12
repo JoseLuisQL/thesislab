@@ -11,6 +11,8 @@ import type {
   CheckpointRepository,
   ClaimEvidenceLinkRecord,
   ClaimEvidenceLinkRepository,
+  CitationRecord,
+  CitationRepository,
   ClaimRecord,
   ClaimRepository,
   ComplianceIssueRecord,
@@ -64,6 +66,7 @@ import {
   sources,
   theses,
   thesisStates,
+  citations,
   workflowPacks,
   workflowSteps,
   workflowTaskCheckpoints,
@@ -205,6 +208,14 @@ class ZoteroMappingSqliteRepository
   }
 }
 
+class CitationSqliteRepository
+  extends GenericSqliteRepository<CitationRecord>
+  implements CitationRepository {
+  constructor(db: ThesisDbClient) {
+    super(db, citations);
+  }
+}
+
 class PolicyProfileSqliteRepository
   extends GenericSqliteRepository<PolicyProfileRecord>
   implements PolicyProfileRepository {
@@ -281,6 +292,7 @@ export function createDomainRepositories(db: ThesisDbClient): DomainRepositories
     claims: new ClaimSqliteRepository(db),
     claimEvidenceLinks: new ClaimEvidenceLinkSqliteRepository(db),
     zoteroMappings: new ZoteroMappingSqliteRepository(db),
+    citations: new CitationSqliteRepository(db),
     policyProfiles: new PolicyProfileSqliteRepository(db),
     complianceRuns: new ComplianceRunSqliteRepository(db),
     complianceIssues: new ComplianceIssueSqliteRepository(db),

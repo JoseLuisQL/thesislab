@@ -27,7 +27,12 @@ export type ThesisRecord = TimestampFields & {
   slug: string;
   degreeProgram: string;
   institution: string;
+  policyProfileId: EntityId | null;
+  openClawAgentId: string | null;
+  openClawSessionKey: string | null;
   workspacePath: string;
+  officialWorkspacePath: string | null;
+  officialEntrypoint: string | null;
   defaultLanguage: string;
   currentState: ThesisLifecycleState;
   latestStatusAt: string;
@@ -83,6 +88,8 @@ export type WorkflowPackRecord = TimestampFields & {
   description: string;
   status: WorkflowPackStatus;
   currentStepId: EntityId | null;
+  openClawAgentId: string | null;
+  openClawSessionKey: string | null;
 };
 
 export type WorkflowStepRecord = TimestampFields & {
@@ -107,7 +114,7 @@ export type CheckpointRecord = TimestampFields & {
   checkpointedAt: string;
 };
 
-export type FeedbackSource = 'user' | 'system' | 'qa' | 'compliance';
+export type FeedbackSource = 'user' | 'system' | 'qa' | 'compliance' | 'advisor';
 
 export type FeedbackEntryRecord = TimestampFields & {
   id: EntityId;
@@ -257,6 +264,21 @@ export type ZoteroMappingRecord = TimestampFields & {
   lastSyncedAt: string | null;
 };
 
+export type CitationStatus = 'draft' | 'linked' | 'validated';
+
+export type CitationRecord = TimestampFields & {
+  id: EntityId;
+  thesisId: EntityId;
+  sourceId: EntityId | null;
+  zoteroMappingId: EntityId | null;
+  normalizedNodeId: EntityId | null;
+  claimId: EntityId | null;
+  citationKey: string;
+  locator: string | null;
+  style: string;
+  status: CitationStatus;
+};
+
 export type PolicyProfileRecord = TimestampFields & {
   id: EntityId;
   institution: string;
@@ -363,6 +385,7 @@ export interface EvidenceFragmentRepository extends Repository<EvidenceFragmentR
 export interface ClaimRepository extends Repository<ClaimRecord> {}
 export interface ClaimEvidenceLinkRepository extends Repository<ClaimEvidenceLinkRecord> {}
 export interface ZoteroMappingRepository extends Repository<ZoteroMappingRecord> {}
+export interface CitationRepository extends Repository<CitationRecord> {}
 export interface PolicyProfileRepository extends Repository<PolicyProfileRecord> {
   findActive(): Promise<PolicyProfileRecord | null>;
 }
@@ -388,6 +411,7 @@ export interface DomainRepositories {
   claims: ClaimRepository;
   claimEvidenceLinks: ClaimEvidenceLinkRepository;
   zoteroMappings: ZoteroMappingRepository;
+  citations: CitationRepository;
   policyProfiles: PolicyProfileRepository;
   complianceRuns: ComplianceRunRepository;
   complianceIssues: ComplianceIssueRepository;

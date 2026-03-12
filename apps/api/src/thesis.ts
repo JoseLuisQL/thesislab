@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import zlib from 'node:zlib';
 
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 
 import {
   academicQaIssues,
@@ -14,6 +14,7 @@ import {
   complianceRuns,
   buildRuns,
   checkpoints,
+  citations,
   claimEvidenceLinks,
   claims,
   evidenceFragments,
@@ -34,6 +35,14 @@ import {
   workflowPacks,
   workflowSteps,
 } from '@thesis-research-os/db';
+import {
+  createAgentRuntime,
+  createZoteroBridgeRuntime,
+  detectRuntimeEnvironment,
+  readOpenClawGatewayStatus,
+  type AgentTarget,
+  type OpenClawGatewayStatus,
+} from '@thesis-research-os/runtime';
 
 type ThesisBlockers = string[];
 
@@ -275,6 +284,17 @@ type LatexBuildPayload = {
   };
 };
 
+type ThesisRow = typeof theses.$inferSelect;
+type ThesisInsertRow = typeof theses.$inferInsert;
+type WorkflowPackRow = typeof workflowPacks.$inferSelect;
+
+type LatexSectionPreviewPayload = {
+  thesisId: string;
+  intakeJobId: string;
+  node: LatexStructureNode;
+  content: string;
+};
+
 export type LatexBuildRunPayload = {
   id: string;
   thesisId: string;
@@ -313,7 +333,12 @@ export type ThesisRecordPayload = {
   slug: string;
   degreeProgram: string;
   institution: string;
+  policyProfileId: string | null;
+  openClawAgentId: string | null;
+  openClawSessionKey: string | null;
   workspacePath: string;
+  officialWorkspacePath: string | null;
+  officialEntrypoint: string | null;
   defaultLanguage: string;
   currentState: ThesisLifecycleState;
   latestStatusAt: string;
@@ -384,7 +409,7 @@ export type ThesisCheckpointPayload = {
 export type ThesisFeedbackPayload = {
   id: string;
   thesisId: string;
-  sourceType: 'user' | 'system' | 'qa' | 'compliance';
+  sourceType: 'user' | 'system' | 'qa' | 'compliance' | 'advisor';
   body: string;
   summary: string | null;
   recordedAt: string;
@@ -457,6 +482,11 @@ export type CreateThesisInput = {
   degreeProgram: string;
   institution: string;
   workspacePath: string;
+  policyProfileId?: string | null;
+  openClawAgentId?: string | null;
+  openClawSessionKey?: string | null;
+  officialWorkspacePath?: string | null;
+  officialEntrypoint?: string | null;
   defaultLanguage?: string;
 };
 
@@ -484,10 +514,51 @@ export type CreateCheckpointInput = {
 };
 
 export type CreateFeedbackInput = {
-  sourceType: 'user' | 'system' | 'qa' | 'compliance';
+  sourceType: 'user' | 'system' | 'qa' | 'compliance' | 'advisor';
   body: string;
   summary?: string | null;
   recordedAt?: string;
+};
+
+export type CitationPayload = {
+  id: string;
+  thesisId: string;
+  sourceId: string | null;
+  zoteroMappingId: string | null;
+  normalizedNodeId: string | null;
+  claimId: string | null;
+  citationKey: string;
+  locator: string | null;
+  style: string;
+  status: 'draft' | 'linked' | 'validated';
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CreateCitationInput = {
+  sourceId?: string | null;
+  zoteroMappingId?: string | null;
+  normalizedNodeId?: string | null;
+  claimId?: string | null;
+  citationKey: string;
+  locator?: string | null;
+  style?: string;
+  status?: 'draft' | 'linked' | 'validated';
+};
+
+export type ZoteroBibliographySyncPayload = {
+  thesisId: string;
+  filePath: string;
+  writtenEntries: number;
+  missingItemKeys: string[];
+  bibliography: string;
+};
+
+export type ResearchCaptureInput = {
+  source: RegisterSourceInput;
+  evidence?: Omit<CreateEvidenceFragmentInput, 'sourceId'>;
+  claim?: CreateClaimInput;
+  citation?: Omit<CreateCitationInput, 'sourceId' | 'claimId'> & { citationKey: string };
 };
 
 export type WorkflowTaskPayload = {
@@ -550,6 +621,8 @@ export type WorkflowPackPayload = {
   description: string;
   status: WorkflowStepStatus;
   currentStepId: string | null;
+  openClawAgentId: string | null;
+  openClawSessionKey: string | null;
   progress: {
     totalSteps: number;
     completedSteps: number;
@@ -578,6 +651,8 @@ export type CreateWorkflowPackInput = {
 export type UpdateWorkflowPackInput = {
   status?: WorkflowStepStatus;
   currentStepId?: string | null;
+  openClawAgentId?: string | null;
+  openClawSessionKey?: string | null;
   steps?: Array<{
     id: string;
     status?: WorkflowStepStatus;
@@ -600,6 +675,26 @@ export type EvidenceContextSetupPayload = {
   activeImportId: string | null;
   normalizedNodes: NormalizedNodePayload[];
   tasks: WorkflowTaskPayload[];
+};
+
+export type OpenClawAssignmentPayload = {
+  thesisId: string;
+  thesisTarget: {
+    agentId: string | null;
+    sessionKey: string | null;
+  };
+  workflowPackTargets: Array<{
+    workflowPackId: string;
+    name: string;
+    status: WorkflowStepStatus;
+    agentId: string | null;
+    sessionKey: string | null;
+  }>;
+};
+
+export type UpdateOpenClawAssignmentInput = {
+  agentId?: string | null;
+  sessionKey?: string | null;
 };
 
 type SourceIngestStatus = 'not_started' | 'queued' | 'succeeded' | 'degraded' | 'failed';
@@ -909,6 +1004,17 @@ export type PolicyProfilePayload = {
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
+};
+
+export type CreatePolicyProfileInput = {
+  id?: string;
+  institution: string;
+  faculty: string;
+  version: string;
+  title: string;
+  requiredSections: string[];
+  rules: PolicyRuleDefinition[];
+  isActive?: boolean;
 };
 
 type ComplianceRunSummary = {
@@ -1265,34 +1371,191 @@ export class ThesisLifecycleService {
   constructor(private readonly db: ThesisDbClient) {}
 
   async listZoteroLibraries(): Promise<ZoteroLibraryPayload[]> {
-    const { createZoteroConnector } = await import('@thesis-research-os/zotero-bridge');
-    const connector = createZoteroConnector();
-    return connector.listLibraries();
+    const bridge = createZoteroBridgeRuntime();
+    return bridge.listLibraries();
   }
 
   async listZoteroCollections(libraryKey?: string | null): Promise<ZoteroCollectionPayload[]> {
-    const { createZoteroConnector } = await import('@thesis-research-os/zotero-bridge');
-    const connector = createZoteroConnector();
-    return connector.listCollections({ libraryKey: libraryKey ?? null });
+    const bridge = createZoteroBridgeRuntime();
+    return bridge.listCollections({ libraryKey: libraryKey ?? null });
   }
 
   async listZoteroItems(input: ListZoteroItemsInput = {}): Promise<ZoteroItemPayload[]> {
-    const { createZoteroConnector } = await import('@thesis-research-os/zotero-bridge');
-    const connector = createZoteroConnector();
-    return connector.listItems({
+    const bridge = createZoteroBridgeRuntime();
+    return bridge.listItems({
       libraryKey: input.libraryKey ?? null,
       collectionKey: input.collectionKey ?? null,
     });
   }
 
   async searchZoteroItems(input: SearchZoteroItemsInput): Promise<ZoteroItemPayload[]> {
-    const { createZoteroConnector } = await import('@thesis-research-os/zotero-bridge');
-    const connector = createZoteroConnector();
-    return connector.searchItems({
+    const bridge = createZoteroBridgeRuntime();
+    return bridge.searchItems({
       query: input.query,
       libraryKey: input.libraryKey ?? null,
       collectionKey: input.collectionKey ?? null,
     });
+  }
+
+  async listPolicyProfiles(): Promise<PolicyProfilePayload[]> {
+    await ensureSeedPolicyProfile(this.db);
+
+    const rows = await this.db
+      .select()
+      .from(policyProfiles)
+      .orderBy(desc(policyProfiles.isActive), asc(policyProfiles.institution), asc(policyProfiles.faculty), desc(policyProfiles.version))
+      .all();
+
+    return rows.map((row) => this.mapPolicyProfileRecord(row));
+  }
+
+  async createPolicyProfile(input: CreatePolicyProfileInput): Promise<PolicyProfilePayload> {
+    const now = new Date().toISOString();
+    const profileId = input.id?.trim() || `${slugify(input.institution)}-${slugify(input.faculty)}-${slugify(input.version)}`;
+
+    if (input.isActive) {
+      await this.db
+        .update(policyProfiles)
+        .set({ isActive: false, updatedAt: now })
+        .where(sql`1 = 1`);
+    }
+
+    await this.db.insert(policyProfiles).values({
+      id: profileId,
+      institution: input.institution,
+      faculty: input.faculty,
+      version: input.version,
+      title: input.title,
+      requiredSectionsJson: JSON.stringify(input.requiredSections),
+      ruleDefinitionsJson: JSON.stringify(input.rules),
+      isActive: input.isActive ?? false,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const record = await this.db.query.policyProfiles.findFirst({
+      where: (fields, operators) => operators.eq(fields.id, profileId),
+    });
+
+    if (!record) {
+      throw new Error(`Policy profile ${profileId} was not persisted.`);
+    }
+
+    return this.mapPolicyProfileRecord(record);
+  }
+
+  async getOpenClawStatus(): Promise<OpenClawGatewayStatus> {
+    return readOpenClawGatewayStatus();
+  }
+
+  async getOpenClawAssignment(thesisId: string): Promise<OpenClawAssignmentPayload> {
+    const thesis = await this.requireThesis(thesisId);
+    const packs = await this.listWorkflowPacks(thesisId);
+
+    return {
+      thesisId,
+      thesisTarget: {
+        agentId: thesis.openClawAgentId ?? null,
+        sessionKey: thesis.openClawSessionKey ?? null,
+      },
+      workflowPackTargets: packs.map((pack) => ({
+        workflowPackId: pack.id,
+        name: pack.name,
+        status: pack.status,
+        agentId: pack.openClawAgentId ?? null,
+        sessionKey: pack.openClawSessionKey ?? null,
+      })),
+    };
+  }
+
+  async updateOpenClawAssignment(thesisId: string, input: UpdateOpenClawAssignmentInput): Promise<OpenClawAssignmentPayload> {
+    const thesis = await this.requireThesis(thesisId);
+    const now = new Date().toISOString();
+
+    await this.db
+      .update(theses)
+      .set({
+        openClawAgentId: input.agentId === undefined ? thesis.openClawAgentId : input.agentId,
+        openClawSessionKey: input.sessionKey === undefined ? thesis.openClawSessionKey : input.sessionKey,
+        updatedAt: now,
+      })
+      .where(eq(theses.id, thesisId));
+
+    return this.getOpenClawAssignment(thesisId);
+  }
+
+  async updateWorkflowPackOpenClawAssignment(
+    thesisId: string,
+    workflowPackId: string,
+    input: UpdateOpenClawAssignmentInput,
+  ): Promise<WorkflowPackPayload> {
+    await this.requireThesis(thesisId);
+    const workflowPack = await this.requireWorkflowPack(thesisId, workflowPackId);
+    const now = new Date().toISOString();
+
+    await this.db
+      .update(workflowPacks)
+      .set({
+        openClawAgentId: input.agentId === undefined ? workflowPack.openClawAgentId : input.agentId,
+        openClawSessionKey: input.sessionKey === undefined ? workflowPack.openClawSessionKey : input.sessionKey,
+        updatedAt: now,
+      })
+      .where(eq(workflowPacks.id, workflowPackId));
+
+    return this.getWorkflowPack(thesisId, workflowPackId);
+  }
+
+  async searchResearch(thesisId: string, query: string) {
+    const agent = createAgentRuntime();
+    return agent.searchAcademic(query, await this.resolveOpenClawTarget(thesisId, ['research']));
+  }
+
+  async fetchResearchPage(thesisId: string, url: string) {
+    const agent = createAgentRuntime();
+    return agent.fetchPage(url, await this.resolveOpenClawTarget(thesisId, ['research']));
+  }
+
+  async captureResearchArtifact(thesisId: string, input: ResearchCaptureInput) {
+    const { source, duplicate } = await this.registerSource(thesisId, input.source);
+
+    const evidenceFragment = input.evidence
+      ? await this.createEvidenceFragment(thesisId, {
+          ...input.evidence,
+          sourceId: source.id,
+        })
+      : null;
+
+    const claim = input.claim
+      ? await this.createClaim(thesisId, {
+          ...input.claim,
+          normalizedNodeId: input.claim.normalizedNodeId ?? input.evidence?.normalizedNodeId ?? null,
+        })
+      : null;
+
+    if (claim && evidenceFragment) {
+      await this.linkClaimToEvidence(thesisId, claim.id, {
+        evidenceFragmentIds: [evidenceFragment.id],
+        rationale: 'Captured together from research workflow.',
+      });
+    }
+
+    const citation = input.citation
+      ? await this.createCitation(thesisId, {
+          ...input.citation,
+          sourceId: source.id,
+          claimId: claim?.id ?? null,
+          normalizedNodeId: input.citation.normalizedNodeId ?? claim?.normalizedNodeId ?? input.evidence?.normalizedNodeId ?? null,
+        })
+      : null
+      ;
+
+    return {
+      source,
+      duplicate,
+      evidenceFragment,
+      claim,
+      citation,
+    };
   }
 
   async getActivePolicyProfile(): Promise<PolicyProfilePayload> {
@@ -1309,9 +1572,25 @@ export class ThesisLifecycleService {
     return this.mapPolicyProfileRecord(record);
   }
 
+  private async getPolicyProfileForThesis(thesis: { policyProfileId: string | null }): Promise<PolicyProfilePayload> {
+    if (!thesis.policyProfileId) {
+      return this.getActivePolicyProfile();
+    }
+
+    const record = await this.db.query.policyProfiles.findFirst({
+      where: (fields, operators) => operators.eq(fields.id, thesis.policyProfileId!),
+    });
+
+    if (!record) {
+      return this.getActivePolicyProfile();
+    }
+
+    return this.mapPolicyProfileRecord(record);
+  }
+
   async createComplianceRun(thesisId: string): Promise<ComplianceRunPayload> {
     const thesis = await this.requireThesis(thesisId);
-    const policyProfile = await this.getActivePolicyProfile();
+    const policyProfile = await this.getPolicyProfileForThesis(thesis);
     const activeWorkspace = await this.getActiveWorkspace(thesis.id, thesis.activeImportId);
     const allNodes = thesis.activeImportId ? await this.listNormalizedNodes(thesisId, thesis.activeImportId) : [];
     const sectionNodes = allNodes.filter((node) => ['chapter', 'section', 'subsection'].includes(node.nodeType));
@@ -1651,9 +1930,9 @@ export class ThesisLifecycleService {
       throw new EvidenceContextScopeError(thesisId, 'Thesis Zotero mappings cannot target a chapter node.');
     }
 
-    const connector = createZoteroMockConnector();
+    const connector = createZoteroBridgeRuntime();
     const now = new Date().toISOString();
-    const normalizedRecord = connector.resolveNormalizedMapping({
+    const normalizedRecord = await connector.resolveMapping({
       libraryId: input.libraryId,
       collectionKey: input.collectionKey ?? null,
       itemKey: input.itemKey ?? null,
@@ -1728,12 +2007,12 @@ export class ThesisLifecycleService {
 
   async refreshZoteroMapping(thesisId: string, mappingId: string, input: RefreshZoteroMappingInput = {}): Promise<ZoteroMappingPayload> {
     const existing = await this.getZoteroMapping(thesisId, mappingId);
-    const connector = createZoteroMockConnector();
+    const connector = createZoteroBridgeRuntime();
     const now = new Date().toISOString();
     const libraryId = input.libraryId ?? existing.libraryId;
     const collectionKey = input.collectionKey === undefined ? existing.collectionKey : input.collectionKey;
     const itemKey = input.itemKey === undefined ? existing.itemKey : input.itemKey;
-    const normalizedRecord = connector.resolveNormalizedMapping({
+    const normalizedRecord = await connector.resolveMapping({
       libraryId,
       collectionKey,
       itemKey,
@@ -1773,25 +2052,31 @@ export class ThesisLifecycleService {
     const stateId = randomUUID();
     const statusSummary = 'Tesis registrada y lista para iniciar el flujo de trabajo local.';
     const nextStepSummary = 'Define el alcance inicial y registra el primer checkpoint de trabajo.';
+    await ensureSeedPolicyProfile(this.db);
 
-    await this.db.insert(theses).values([
-      {
-        id: thesisId,
-        title: input.title,
-        slug,
-        degreeProgram: input.degreeProgram,
-        institution: input.institution,
-        workspacePath: input.workspacePath,
-        defaultLanguage,
-        currentState: 'draft',
-        latestStatusAt: now,
-        nextStepSummary,
-        activeImportId: null,
-        activeBuildRunId: null,
-        createdAt: now,
-        updatedAt: now,
-      },
-    ]);
+    const thesisRecord: ThesisInsertRow = {
+      id: thesisId,
+      title: input.title,
+      slug,
+      degreeProgram: input.degreeProgram,
+      institution: input.institution,
+      policyProfileId: input.policyProfileId ?? SEEDED_POLICY_PROFILE_ID,
+      openClawAgentId: input.openClawAgentId ?? null,
+      openClawSessionKey: input.openClawSessionKey ?? null,
+      workspacePath: input.workspacePath,
+      officialWorkspacePath: input.officialWorkspacePath ?? input.workspacePath,
+      officialEntrypoint: input.officialEntrypoint ?? null,
+      defaultLanguage,
+      currentState: 'draft',
+      latestStatusAt: now,
+      nextStepSummary,
+      activeImportId: null,
+      activeBuildRunId: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    await this.db.insert(theses).values([thesisRecord]);
 
     await this.db.insert(thesisStates).values([
       {
@@ -1809,11 +2094,13 @@ export class ThesisLifecycleService {
       },
     ]);
 
+    await this.seedDefaultWorkflowPacks(thesisId, now);
+
     return this.getThesisDetail(thesisId);
   }
 
   async getThesisDetail(thesisId: string): Promise<ThesisDetailPayload> {
-    const thesis = await this.db.query.theses.findFirst({
+    const thesis: ThesisRow | undefined = await this.db.query.theses.findFirst({
       where: (fields, operators) => operators.eq(fields.id, thesisId),
     });
 
@@ -1861,7 +2148,7 @@ export class ThesisLifecycleService {
   }
 
   async updateThesis(thesisId: string, input: UpdateThesisInput): Promise<ThesisDetailPayload> {
-    const thesis = await this.db.query.theses.findFirst({
+    const thesis: ThesisRow | undefined = await this.db.query.theses.findFirst({
       where: (fields, operators) => operators.eq(fields.id, thesisId),
     });
 
@@ -1879,7 +2166,12 @@ export class ThesisLifecycleService {
         slug: title === thesis.title ? thesis.slug : await this.createUniqueSlug(title, thesis.id),
         degreeProgram: input.degreeProgram ?? thesis.degreeProgram,
         institution: input.institution ?? thesis.institution,
+        policyProfileId: input.policyProfileId ?? thesis.policyProfileId,
+        openClawAgentId: input.openClawAgentId ?? thesis.openClawAgentId,
+        openClawSessionKey: input.openClawSessionKey ?? thesis.openClawSessionKey,
         workspacePath: input.workspacePath ?? thesis.workspacePath,
+        officialWorkspacePath: input.officialWorkspacePath ?? thesis.officialWorkspacePath,
+        officialEntrypoint: input.officialEntrypoint ?? thesis.officialEntrypoint,
         defaultLanguage: input.defaultLanguage ?? thesis.defaultLanguage,
         updatedAt: now,
       })
@@ -1982,7 +2274,7 @@ export class ThesisLifecycleService {
 
   async editLatexSection(thesisId: string, input: LatexEditRequest): Promise<LatexEditPayload> {
     const thesis = await this.requireThesis(thesisId);
-    const activeWorkspace = await this.requireActiveLatexWorkspace(thesisId, thesis.activeImportId);
+    const activeWorkspace = await this.requireActiveLatexWorkspace(thesis);
     const resolution = this.resolveLatexEditTarget(thesis.workspacePath, activeWorkspace, input.target);
     const targetSourcePath = resolution.node.sourcePath;
     if (!targetSourcePath) {
@@ -2098,6 +2390,37 @@ export class ThesisLifecycleService {
     };
   }
 
+  async getLatexStructure(thesisId: string): Promise<LatexStructureSnapshot> {
+    const thesis = await this.requireThesis(thesisId);
+    const activeWorkspace = await this.requireActiveLatexWorkspace(thesis);
+
+    return inspectLatexWorkspace(thesis.workspacePath, activeWorkspace.importRootPath);
+  }
+
+  async getLatexSectionPreview(thesisId: string, normalizedNodeId: string): Promise<LatexSectionPreviewPayload> {
+    const thesis = await this.requireThesis(thesisId);
+    const activeWorkspace = await this.requireActiveLatexWorkspace(thesis);
+    const structure = inspectLatexWorkspace(thesis.workspacePath, activeWorkspace.importRootPath);
+    const node = structure.outline.find((entry) => entry.normalizedNodeId === normalizedNodeId);
+
+    if (!node || !node.sourcePath || !node.anchor.start) {
+      throw new LatexEditConflictError(thesisId, ['The requested LaTeX preview target does not resolve to a concrete source node.'], structure);
+    }
+
+    const filePath = path.join(activeWorkspace.importRootPath, node.sourcePath);
+    const content = fs.readFileSync(filePath, 'utf8');
+    const lines = content.split(/\r?\n/);
+    const startLine = Number(node.anchor.start);
+    const endLine = Number(node.anchor.end ?? node.anchor.start);
+
+    return {
+      thesisId,
+      intakeJobId: activeWorkspace.id,
+      node,
+      content: lines.slice(startLine - 1, endLine).join('\n'),
+    };
+  }
+
   async restoreLatexCheckpoint(thesisId: string, checkpointId: string): Promise<LatexRestorePayload> {
     const thesis = await this.requireThesis(thesisId);
     const checkpoint = await this.db.query.checkpoints.findFirst({
@@ -2159,7 +2482,7 @@ export class ThesisLifecycleService {
 
   async runLatexBuild(thesisId: string, input: { createdBy: string }): Promise<LatexBuildPayload> {
     const thesis = await this.requireThesis(thesisId);
-    const activeWorkspace = await this.requireActiveLatexWorkspace(thesisId, thesis.activeImportId);
+    const activeWorkspace = await this.requireActiveLatexWorkspace(thesis);
     const structure = inspectLatexWorkspace(thesis.workspacePath, activeWorkspace.importRootPath);
     const bibliography = detectBibliographyConfiguration(activeWorkspace.importRootPath, structure.includeGraph?.filesInOrder ?? []);
     const buildRoot = resolveLatexBuildRoot(activeWorkspace.importRootPath, structure.entrypoint);
@@ -2362,6 +2685,103 @@ export class ThesisLifecycleService {
       createdAt: recordedAt,
       updatedAt: recordedAt,
     });
+  }
+
+  async createCitation(thesisId: string, input: CreateCitationInput): Promise<CitationPayload> {
+    await this.requireThesis(thesisId);
+
+    if (input.sourceId) {
+      await this.getSource(thesisId, input.sourceId);
+    }
+    if (input.zoteroMappingId) {
+      await this.getZoteroMapping(thesisId, input.zoteroMappingId);
+    }
+    if (input.normalizedNodeId) {
+      await this.requireNormalizedNode(thesisId, input.normalizedNodeId);
+    }
+    if (input.claimId) {
+      await this.getClaim(thesisId, input.claimId);
+    }
+
+    const now = new Date().toISOString();
+    const id = randomUUID();
+
+    await this.db.insert(citations).values({
+      id,
+      thesisId,
+      sourceId: input.sourceId ?? null,
+      zoteroMappingId: input.zoteroMappingId ?? null,
+      normalizedNodeId: input.normalizedNodeId ?? null,
+      claimId: input.claimId ?? null,
+      citationKey: input.citationKey,
+      locator: input.locator ?? null,
+      style: input.style ?? 'bibtex',
+      status: input.status ?? 'draft',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const record = await this.db.query.citations.findFirst({
+      where: (fields, operators) => operators.eq(fields.id, id),
+    });
+
+    if (!record) {
+      throw new Error(`Citation ${id} was not persisted.`);
+    }
+
+    return this.mapCitationRecord(record);
+  }
+
+  async listCitations(thesisId: string): Promise<CitationPayload[]> {
+    await this.requireThesis(thesisId);
+
+    const rows = await this.db
+      .select()
+      .from(citations)
+      .where(eq(citations.thesisId, thesisId))
+      .orderBy(desc(citations.updatedAt), desc(citations.createdAt), asc(citations.id))
+      .all();
+
+    return rows.map((row) => this.mapCitationRecord(row));
+  }
+
+  async syncZoteroBibliography(thesisId: string): Promise<ZoteroBibliographySyncPayload> {
+    const thesis = await this.requireThesis(thesisId);
+    const { exportCollectionToBibtex } = await import('@thesis-research-os/zotero-bridge');
+    const connector = createZoteroBridgeRuntime();
+    const mappings = await this.listZoteroMappings(thesisId);
+    const itemMappings = mappings.filter((mapping) => mapping.itemKey);
+    const matchedItems = new Map<string, ZoteroItemPayload>();
+    const missingItemKeys: string[] = [];
+
+    for (const mapping of itemMappings) {
+      const items = await Promise.resolve(connector.listItems({
+        libraryKey: mapping.libraryId,
+        collectionKey: mapping.collectionKey ?? null,
+      }));
+      const matched = items.find((item) => item.key === mapping.itemKey);
+      if (!matched || matchedItems.has(matched.key)) {
+        if (!matched && mapping.itemKey) {
+          missingItemKeys.push(mapping.itemKey);
+        }
+        continue;
+      }
+      matchedItems.set(matched.key, matched);
+    }
+
+    const bibliography = exportCollectionToBibtex(Array.from(matchedItems.values()));
+    const bibliographyRoot = thesis.officialWorkspacePath ?? thesis.workspacePath;
+    const bibliographyPath = path.join(bibliographyRoot, 'references', 'zotero.bib');
+    fs.mkdirSync(path.dirname(bibliographyPath), { recursive: true });
+    fs.writeFileSync(bibliographyPath, bibliography, 'utf8');
+
+    return {
+      thesisId,
+      filePath: bibliographyPath,
+      writtenEntries: matchedItems.size,
+      missingItemKeys,
+      bibliography,
+    };
   }
 
   async createWorkflowTask(thesisId: string, input: CreateWorkflowTaskInput): Promise<WorkflowTaskPayload> {
@@ -3288,6 +3708,35 @@ export class ThesisLifecycleService {
         })
         .where(eq(intakeJobs.id, intakeJobId));
 
+      let officialWorkspacePath = thesis.officialWorkspacePath;
+      let officialEntrypoint = thesis.officialEntrypoint;
+
+      if (outcome.status === 'succeeded') {
+        if (outcome.detection.format === 'latex') {
+          officialWorkspacePath = job.importRootPath;
+          officialEntrypoint = outcome.detectedEntrypoint;
+        } else {
+          const managedWorkspace = await materializeOfficialLatexWorkspace({
+            thesisWorkspacePath: thesis.workspacePath,
+            intakeJobId,
+            sourceFormat: outcome.detection.format,
+            importRootPath: job.importRootPath,
+            nodes: outcome.normalizedNodes,
+          });
+          officialWorkspacePath = managedWorkspace.workspacePath;
+          officialEntrypoint = managedWorkspace.entrypoint;
+          report.warnings.push(...managedWorkspace.warnings);
+          report.recommendedNextSteps = [
+            {
+              code: 'OFFICIAL_LATEX_WORKSPACE_READY',
+              message: 'El workspace LaTeX oficial se generó y está listo para revisión y compilación.',
+              triggeredBy: ['workspace:official-latex'],
+            },
+            ...report.recommendedNextSteps,
+          ];
+        }
+      }
+
       if (outcome.status === 'succeeded' && priorActiveImportId && recoverableCheckpointId) {
         const priorActiveJob = await tx.query.intakeJobs.findFirst({
           where: (fields, operators) => operators.eq(fields.id, priorActiveImportId),
@@ -3339,6 +3788,8 @@ export class ThesisLifecycleService {
             latestStatusAt: completedAt,
             nextStepSummary: summarizeRecommendedNextStep(recommendations),
             activeImportId: intakeJobId,
+            officialWorkspacePath,
+            officialEntrypoint,
             updatedAt: completedAt,
           })
           .where(eq(theses.id, thesisId));
@@ -3443,7 +3894,48 @@ export class ThesisLifecycleService {
     };
   }
 
-  private async requireThesis(thesisId: string) {
+  private async seedDefaultWorkflowPacks(thesisId: string, timestamp: string) {
+    const packBlueprints = [
+      { name: 'intake', description: 'Importar y normalizar el material base.', steps: ['Registrar origen', 'Validar estructura', 'Confirmar workspace oficial'] },
+      { name: 'estructura', description: 'Definir capítulos y secciones oficiales.', steps: ['Revisar outline', 'Ajustar capítulos', 'Verificar secciones requeridas'] },
+      { name: 'research', description: 'Buscar y capturar evidencia verificable.', steps: ['Buscar fuentes', 'Capturar evidencia', 'Vincular claims'] },
+      { name: 'redacción', description: 'Editar el documento LaTeX oficial.', steps: ['Actualizar secciones', 'Compilar borrador', 'Registrar checkpoint'] },
+      { name: 'bibliografía', description: 'Mantener citas y sincronización bibliográfica.', steps: ['Revisar Zotero', 'Sincronizar .bib', 'Validar citas'] },
+      { name: 'compliance', description: 'Verificar cumplimiento institucional.', steps: ['Cargar perfil', 'Ejecutar checks', 'Corregir issues'] },
+      { name: 'qa', description: 'Ejecutar revisión académica basada en evidencia.', steps: ['Ejecutar QA', 'Resolver hallazgos', 'Actualizar resumen'] },
+      { name: 'cierre', description: 'Preparar la tesis para la entrega final.', steps: ['Compilar versión final', 'Validar anexos', 'Cerrar pendientes'] },
+    ];
+
+    for (const [packIndex, blueprint] of packBlueprints.entries()) {
+      const workflowPackId = randomUUID();
+      const steps = blueprint.steps.map((stepTitle, stepIndex) => ({
+        id: randomUUID(),
+        thesisId,
+        workflowPackId,
+        title: stepTitle,
+        description: `${blueprint.description} Paso ${stepIndex + 1}.`,
+        status: packIndex === 0 && stepIndex === 0 ? 'in_progress' : 'pending',
+        stepOrder: stepIndex + 1,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }));
+
+      await this.db.insert(workflowPacks).values({
+        id: workflowPackId,
+        thesisId,
+        name: blueprint.name,
+        description: blueprint.description,
+        status: packIndex === 0 ? 'in_progress' : 'pending',
+        currentStepId: steps[0]?.id ?? null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+
+      await this.db.insert(workflowSteps).values(steps);
+    }
+  }
+
+  private async requireThesis(thesisId: string): Promise<ThesisRow> {
     const thesis = await this.db.query.theses.findFirst({
       where: (fields, operators) => operators.eq(fields.id, thesisId),
     });
@@ -3489,7 +3981,7 @@ export class ThesisLifecycleService {
     return row;
   }
 
-  private async requireWorkflowPack(thesisId: string, workflowPackId: string) {
+  private async requireWorkflowPack(thesisId: string, workflowPackId: string): Promise<WorkflowPackRow> {
     const row = await this.db.query.workflowPacks.findFirst({
       where: (fields, operators) =>
         operators.and(operators.eq(fields.id, workflowPackId), operators.eq(fields.thesisId, thesisId)),
@@ -3514,6 +4006,36 @@ export class ThesisLifecycleService {
       )
       .orderBy(asc(workflowSteps.stepOrder), asc(workflowSteps.id))
       .all();
+  }
+
+  private async resolveOpenClawTarget(thesisId: string, preferredPackNames: string[] = []): Promise<AgentTarget | null> {
+    const thesis = await this.requireThesis(thesisId);
+    const normalizedNames = preferredPackNames.map((name) => name.trim().toLowerCase()).filter(Boolean);
+
+    if (normalizedNames.length > 0) {
+      const packRows = await this.db
+        .select()
+        .from(workflowPacks)
+        .where(eq(workflowPacks.thesisId, thesisId))
+        .all();
+
+      const matchingPack = packRows.find((pack) => normalizedNames.includes(pack.name.trim().toLowerCase()));
+      if (matchingPack && (matchingPack.openClawAgentId || matchingPack.openClawSessionKey)) {
+        return {
+          agentId: matchingPack.openClawAgentId ?? null,
+          sessionKey: matchingPack.openClawSessionKey ?? null,
+        };
+      }
+    }
+
+    if (thesis.openClawAgentId || thesis.openClawSessionKey) {
+      return {
+        agentId: thesis.openClawAgentId ?? null,
+        sessionKey: thesis.openClawSessionKey ?? null,
+      };
+    }
+
+    return null;
   }
 
   private mapIntakeJobRecord(record: {
@@ -3555,22 +4077,7 @@ export class ThesisLifecycleService {
     };
   }
 
-  private mapThesisRecord(record: ThesisRecordPayload | {
-    id: string;
-    title: string;
-    slug: string;
-    degreeProgram: string;
-    institution: string;
-    workspacePath: string;
-    defaultLanguage: string;
-    currentState: string;
-    latestStatusAt: string;
-    nextStepSummary: string;
-    activeImportId: string | null;
-    activeBuildRunId: string | null;
-    createdAt: string;
-    updatedAt: string;
-  }): ThesisRecordPayload {
+  private mapThesisRecord(record: ThesisRecordPayload | ThesisRow): ThesisRecordPayload {
     return {
       ...record,
       currentState: record.currentState as ThesisLifecycleState,
@@ -3635,21 +4142,36 @@ export class ThesisLifecycleService {
     };
   }
 
-  private async requireActiveLatexWorkspace(thesisId: string, activeImportId: string | null) {
-    if (!activeImportId) {
-      throw new LatexWorkspaceNotReadyError(thesisId);
+  private async requireActiveLatexWorkspace(thesis: {
+    id: string;
+    activeImportId: string | null;
+    officialWorkspacePath: string | null;
+    officialEntrypoint: string | null;
+  }) {
+    if (thesis.activeImportId) {
+      const activeJob = await this.db.query.intakeJobs.findFirst({
+        where: (fields, operators) =>
+          operators.and(operators.eq(fields.id, thesis.activeImportId!), operators.eq(fields.thesisId, thesis.id)),
+      });
+
+      if (activeJob && normalizeSourceFormat(activeJob.sourceFormat) === 'latex' && normalizeIntakeStatus(activeJob.status) === 'succeeded') {
+        return activeJob;
+      }
     }
 
-    const activeJob = await this.db.query.intakeJobs.findFirst({
-      where: (fields, operators) =>
-        operators.and(operators.eq(fields.id, activeImportId), operators.eq(fields.thesisId, thesisId)),
-    });
-
-    if (!activeJob || normalizeSourceFormat(activeJob.sourceFormat) !== 'latex' || normalizeIntakeStatus(activeJob.status) !== 'succeeded') {
-      throw new LatexWorkspaceNotReadyError(thesisId);
+    if (thesis.officialWorkspacePath && thesis.officialEntrypoint && fs.existsSync(path.join(thesis.officialWorkspacePath, thesis.officialEntrypoint))) {
+      return {
+        id: thesis.activeImportId ?? `official:${thesis.id}`,
+        thesisId: thesis.id,
+        sourceFormat: 'latex',
+        status: 'succeeded',
+        importRootPath: thesis.officialWorkspacePath,
+        detectedEntrypoint: thesis.officialEntrypoint,
+        reportJson: JSON.stringify({}),
+      };
     }
 
-    return activeJob;
+    throw new LatexWorkspaceNotReadyError(thesis.id);
   }
 
   private resolveLatexEditTarget(workspacePath: string, activeJob: { id: string; importRootPath: string; reportJson: string }, target: LatexEditTarget) {
@@ -3722,6 +4244,23 @@ export class ThesisLifecycleService {
     };
   }
 
+  private mapCitationRecord(record: typeof citations.$inferSelect): CitationPayload {
+    return {
+      id: record.id,
+      thesisId: record.thesisId,
+      sourceId: record.sourceId,
+      zoteroMappingId: record.zoteroMappingId,
+      normalizedNodeId: record.normalizedNodeId,
+      claimId: record.claimId,
+      citationKey: record.citationKey,
+      locator: record.locator,
+      style: record.style,
+      status: record.status as CitationPayload['status'],
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+    };
+  }
+
   private mapWorkflowTaskCheckpointRecord(record: typeof workflowTaskCheckpoints.$inferSelect): WorkflowTaskCheckpointPayload {
     return {
       id: record.id,
@@ -3737,7 +4276,7 @@ export class ThesisLifecycleService {
     };
   }
 
-  private async mapWorkflowPackRecord(record: typeof workflowPacks.$inferSelect): Promise<WorkflowPackPayload> {
+  private async mapWorkflowPackRecord(record: WorkflowPackRow): Promise<WorkflowPackPayload> {
     const steps = (await this.listWorkflowStepsForPack(record.thesisId, record.id)).map((step) =>
       this.mapWorkflowStepRecord(step, record.currentStepId),
     );
@@ -3749,6 +4288,8 @@ export class ThesisLifecycleService {
       description: record.description,
       status: this.normalizeWorkflowStepStatus(record.status),
       currentStepId: record.currentStepId,
+      openClawAgentId: record.openClawAgentId,
+      openClawSessionKey: record.openClawSessionKey,
       progress: {
         totalSteps: steps.length,
         completedSteps: steps.filter((step) => step.status === 'completed').length,
@@ -4378,6 +4919,10 @@ function slugify(value: string): string {
   return normalized || 'tesis';
 }
 
+function toPortablePath(value: string) {
+  return value.replace(/\\/g, '/');
+}
+
 function summarizeFeedback(body: string): string {
   const normalized = body.trim().replace(/\s+/g, ' ');
   return normalized.length <= 120 ? normalized : `${normalized.slice(0, 117)}...`;
@@ -4389,6 +4934,7 @@ function normalizeFeedbackSource(value: string): ThesisFeedbackSource {
     case 'system':
     case 'qa':
     case 'compliance':
+    case 'advisor':
       return value;
     default:
       return 'system';
@@ -4624,59 +5170,94 @@ function parseIntakeReport(value: string): IntakeReportSummary | null {
   }
 }
 
-const SEEDED_POLICY_PROFILE_ID = 'policy-profile-universidad-demo-ingenieria-v1';
+const SEEDED_POLICY_PROFILE_PATH = path.join(
+  findRepoRoot(process.cwd()) ?? process.cwd(),
+  'packages',
+  'university-policy-engine',
+  'profiles',
+  'pucp-fci.json',
+);
+const SEEDED_POLICY_PROFILE_ID = 'policy-profile-pucp-fci-2026-1';
 
-const SEEDED_POLICY_RULES: PolicyRuleDefinition[] = [
-  {
-    id: 'structure.required-introduction',
-    title: 'Introducción obligatoria',
-    description: 'La tesis debe incluir una sección o capítulo de introducción.',
-    category: 'structure',
-    severity: 'violation',
-    remediation: 'Añade una sección de Introducción con el contexto del problema y el objetivo general.',
-    requiredSectionTitle: 'Introducción',
-  },
-  {
-    id: 'structure.required-methodology',
-    title: 'Metodología obligatoria',
-    description: 'La tesis debe describir la metodología utilizada.',
-    category: 'structure',
-    severity: 'violation',
-    remediation: 'Añade una sección de Metodología que detalle el enfoque de investigación.',
-    requiredSectionTitle: 'Metodología',
-  },
-  {
-    id: 'structure.required-results',
-    title: 'Resultados obligatorios',
-    description: 'La tesis debe presentar una sección de resultados.',
-    category: 'structure',
-    severity: 'violation',
-    remediation: 'Añade una sección de Resultados con los hallazgos principales.',
-    requiredSectionTitle: 'Resultados',
-  },
-  {
-    id: 'structure.required-conclusions',
-    title: 'Conclusiones obligatorias',
-    description: 'La tesis debe cerrar con una sección de conclusiones.',
-    category: 'structure',
-    severity: 'violation',
-    remediation: 'Añade una sección de Conclusiones con el cierre y trabajo futuro.',
-    requiredSectionTitle: 'Conclusiones',
-  },
-  {
-    id: 'metadata.min-section-count',
-    title: 'Mínimo de secciones estructurales',
-    description: 'La estructura normalizada debe contener al menos dos secciones principales evaluables.',
-    category: 'metadata',
-    severity: 'warning',
-    remediation: 'Amplía la estructura visible de la tesis antes de ejecutar la validación final.',
-    minimumDocumentChildren: 2,
-  },
-];
+function readSeedPolicyProfileDefinition() {
+  const fallback = {
+    id: SEEDED_POLICY_PROFILE_ID,
+    institution: 'Pontificia Universidad Catolica del Peru',
+    faculty: 'Facultad de Ciencias e Ingenieria',
+    version: '2026.1',
+    title: 'PUCP FCI - Tesis de ingenieria',
+    requiredSections: ['Introduccion', 'Metodologia', 'Resultados', 'Conclusiones'],
+    rules: [
+      {
+        id: 'structure.required-introduction',
+        title: 'Introduccion obligatoria',
+        description: 'La tesis debe incluir una introduccion con contexto, problema y objetivos.',
+        category: 'structure',
+        severity: 'violation',
+        remediation: 'Añade una seccion de Introduccion con contexto, problema y objetivo general.',
+        requiredSectionTitle: 'Introduccion',
+      },
+      {
+        id: 'structure.required-methodology',
+        title: 'Metodologia obligatoria',
+        description: 'La tesis debe describir el enfoque metodologico aplicado.',
+        category: 'structure',
+        severity: 'violation',
+        remediation: 'Añade una seccion de Metodologia con el enfoque, procedimiento e instrumentos usados.',
+        requiredSectionTitle: 'Metodologia',
+      },
+      {
+        id: 'structure.required-results',
+        title: 'Resultados obligatorios',
+        description: 'La tesis debe presentar resultados observables y verificables.',
+        category: 'structure',
+        severity: 'violation',
+        remediation: 'Añade una seccion de Resultados con hallazgos y evidencia asociada.',
+        requiredSectionTitle: 'Resultados',
+      },
+      {
+        id: 'structure.required-conclusions',
+        title: 'Conclusiones obligatorias',
+        description: 'La tesis debe cerrar con conclusiones y cierre del trabajo.',
+        category: 'structure',
+        severity: 'violation',
+        remediation: 'Añade una seccion de Conclusiones con sintesis y trabajo futuro.',
+        requiredSectionTitle: 'Conclusiones',
+      },
+      {
+        id: 'metadata.min-section-count',
+        title: 'Minimo de secciones estructurales',
+        description: 'La tesis debe tener al menos dos secciones evaluables en el modelo normalizado.',
+        category: 'metadata',
+        severity: 'warning',
+        remediation: 'Amplia la estructura visible de la tesis antes del cierre.',
+        minimumDocumentChildren: 2,
+      },
+    ] satisfies PolicyRuleDefinition[],
+  };
+
+  try {
+    const raw = fs.readFileSync(SEEDED_POLICY_PROFILE_PATH, 'utf8');
+    const parsed = JSON.parse(raw) as {
+      id: string;
+      institution: string;
+      faculty: string;
+      version: string;
+      title: string;
+      requiredSections: string[];
+      rules: PolicyRuleDefinition[];
+    };
+
+    return parsed;
+  } catch {
+    return fallback;
+  }
+}
 
 async function ensureSeedPolicyProfile(db: ThesisDbClient) {
+  const seededProfile = readSeedPolicyProfileDefinition();
   const existing = await db.query.policyProfiles.findFirst({
-    where: (fields, operators) => operators.eq(fields.id, SEEDED_POLICY_PROFILE_ID),
+    where: (fields, operators) => operators.eq(fields.id, seededProfile.id),
   });
 
   if (existing) {
@@ -4684,7 +5265,7 @@ async function ensureSeedPolicyProfile(db: ThesisDbClient) {
       await db
         .update(policyProfiles)
         .set({ isActive: true, updatedAt: new Date().toISOString() })
-        .where(eq(policyProfiles.id, SEEDED_POLICY_PROFILE_ID));
+        .where(eq(policyProfiles.id, seededProfile.id));
     }
 
     return;
@@ -4692,18 +5273,13 @@ async function ensureSeedPolicyProfile(db: ThesisDbClient) {
 
   const now = new Date().toISOString();
   await db.insert(policyProfiles).values({
-    id: SEEDED_POLICY_PROFILE_ID,
-    institution: 'Universidad Demo',
-    faculty: 'Ingeniería',
-    version: '2026.1',
-    title: 'Perfil de cumplimiento v1 para Facultad de Ingeniería',
-    requiredSectionsJson: JSON.stringify([
-      'Introducción',
-      'Metodología',
-      'Resultados',
-      'Conclusiones',
-    ]),
-    ruleDefinitionsJson: JSON.stringify(SEEDED_POLICY_RULES),
+    id: seededProfile.id,
+    institution: seededProfile.institution,
+    faculty: seededProfile.faculty,
+    version: seededProfile.version,
+    title: seededProfile.title,
+    requiredSectionsJson: JSON.stringify(seededProfile.requiredSections),
+    ruleDefinitionsJson: JSON.stringify(seededProfile.rules),
     isActive: true,
     createdAt: now,
     updatedAt: now,
@@ -5114,6 +5690,138 @@ function buildIntakeRecommendations(input: {
 
 function summarizeRecommendedNextStep(recommendations: IntakeReportRecommendation[]): string {
   return recommendations[0]?.message ?? 'Review the latest thesis state and continue the next workflow step.';
+}
+
+function resolveWritableWorkspaceRoot(workspacePath: string) {
+  const directPath = path.resolve(workspacePath);
+  if (fs.existsSync(directPath)) {
+    return directPath;
+  }
+
+  const translatedHostPath = translateHostPathToMountedRoot(workspacePath);
+  if (translatedHostPath) {
+    return translatedHostPath;
+  }
+
+  const mappedPath = mapWorkspacePathToMountedRoot(workspacePath);
+  return fs.existsSync(mappedPath) ? mappedPath : directPath;
+}
+
+function commandAvailable(command: string) {
+  const result = spawnSync(process.platform === 'win32' ? 'where' : 'which', [command], {
+    encoding: 'utf8',
+    stdio: 'pipe',
+  });
+  return result.status === 0;
+}
+
+function sanitizeLatexText(value: string | null | undefined) {
+  return (value ?? '')
+    .replace(/\\/g, '\\textbackslash{}')
+    .replace(/([%$&#_{}])/g, '\\$1')
+    .replace(/\^/g, '\\textasciicircum{}')
+    .replace(/~/g, '\\textasciitilde{}');
+}
+
+async function materializeOfficialLatexWorkspace(input: {
+  thesisWorkspacePath: string;
+  intakeJobId: string;
+  sourceFormat: SourceFormat;
+  importRootPath: string;
+  nodes: InsertNormalizedNode[];
+}) {
+  const workspaceRoot = path.join(resolveWritableWorkspaceRoot(input.thesisWorkspacePath), 'managed-latex', input.intakeJobId);
+  fs.mkdirSync(workspaceRoot, { recursive: true });
+
+  const runtime = detectRuntimeEnvironment();
+  const warnings: string[] = [];
+  const entrypoint = 'main.tex';
+
+  if (input.sourceFormat === 'docx' && runtime.capabilities.pandoc.state === 'available' && commandAvailable('pandoc')) {
+    const pandocOutputPath = path.join(workspaceRoot, entrypoint);
+    const result = spawnSync('pandoc', ['-s', input.importRootPath, '-t', 'latex', '-o', pandocOutputPath], {
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+
+    if (result.status === 0 && fs.existsSync(pandocOutputPath)) {
+      warnings.push('DOCX import used native Pandoc to materialize the official LaTeX workspace.');
+      return { workspacePath: workspaceRoot, entrypoint, warnings };
+    }
+
+    warnings.push('Pandoc conversion was attempted but failed; fallback LaTeX generation was used instead.');
+  }
+
+  if (input.sourceFormat === 'docx' && runtime.capabilities.libreoffice.state === 'available' && (commandAvailable('soffice') || commandAvailable('libreoffice'))) {
+    const converter = commandAvailable('soffice') ? 'soffice' : 'libreoffice';
+    const result = spawnSync(converter, ['--headless', '--convert-to', 'txt:Text', '--outdir', workspaceRoot, input.importRootPath], {
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    const txtFallbackPath = path.join(workspaceRoot, `${path.basename(input.importRootPath, path.extname(input.importRootPath))}.txt`);
+
+    if (result.status === 0 && fs.existsSync(txtFallbackPath)) {
+      const text = fs.readFileSync(txtFallbackPath, 'utf8').trim();
+      if (text) {
+        const txtBody = [
+          '\\documentclass{report}',
+          '\\usepackage[utf8]{inputenc}',
+          '\\begin{document}',
+          '\\chapter{Imported Draft}',
+          sanitizeLatexText(text.slice(0, 8000)),
+          '\\end{document}',
+          '',
+        ].join('\n');
+        fs.writeFileSync(path.join(workspaceRoot, entrypoint), txtBody, 'utf8');
+        warnings.push('DOCX import used LibreOffice text conversion fallback to build the official LaTeX workspace.');
+        return { workspacePath: workspaceRoot, entrypoint, warnings };
+      }
+    }
+
+    warnings.push('LibreOffice conversion fallback was attempted but did not produce a readable text export.');
+  }
+
+  const bodyLines: string[] = ['\\documentclass{report}', '\\usepackage[utf8]{inputenc}', '\\begin{document}'];
+  const contentNodes = input.nodes.filter((node) => ['chapter', 'section', 'subsection'].includes(node.nodeType));
+
+  if (contentNodes.length === 0) {
+    bodyLines.push('\\chapter{Imported Draft}', sanitizeLatexText(path.basename(input.importRootPath)));
+  } else {
+    for (const node of contentNodes) {
+      const title = sanitizeLatexText(node.title ?? 'Untitled');
+      if (node.nodeType === 'chapter') {
+        bodyLines.push(`\\chapter{${title}}`);
+      } else if (node.nodeType === 'section') {
+        bodyLines.push(`\\section{${title}}`);
+      } else {
+        bodyLines.push(`\\subsection{${title}}`);
+      }
+
+      const provenance = parseJsonObject(node.provenanceJson ?? '{}') ?? {};
+      const summary = typeof provenance.filePath === 'string'
+        ? `Imported from ${provenance.filePath}`
+        : `Imported from ${input.sourceFormat.toUpperCase()} source`;
+      bodyLines.push(sanitizeLatexText(summary));
+    }
+  }
+
+  if (input.sourceFormat === 'pdf') {
+    const pdfExtraction = await extractPdfImportText(input.importRootPath);
+    if (pdfExtraction.text.trim()) {
+      bodyLines.push('\\chapter{Recovered PDF Text}');
+      bodyLines.push(sanitizeLatexText(pdfExtraction.text.slice(0, 8000)));
+      warnings.push(...pdfExtraction.warnings);
+    } else {
+      warnings.push(...pdfExtraction.warnings);
+      warnings.push('The managed PDF LaTeX workspace was generated from structural outline only because no usable extracted text was available.');
+    }
+  }
+
+  bodyLines.push('\\end{document}', '');
+  fs.writeFileSync(path.join(workspaceRoot, entrypoint), bodyLines.join('\n'), 'utf8');
+  warnings.push(`A managed official LaTeX workspace was generated from the ${input.sourceFormat.toUpperCase()} import.`);
+
+  return { workspacePath: workspaceRoot, entrypoint, warnings };
 }
 
 function parseStringArray(value: string): string[] {
@@ -6031,7 +6739,7 @@ function collectWorkspaceBoundaryCandidates(workspacePath: string, importRootPat
 }
 
 function mapWorkspacePathToMountedRoot(workspacePath: string) {
-  const cwd = path.resolve(process.cwd());
+  const cwd = path.resolve(findRepoRoot(process.cwd()) ?? process.cwd());
   const mountedRoot = fs.existsSync(cwd) ? fs.realpathSync.native(cwd) : cwd;
   const mountedRootSegments = splitPathSegments(mountedRoot);
   const workspaceSegments = splitPathSegments(path.resolve(workspacePath));
@@ -6149,18 +6857,42 @@ function resolveAbsoluteImportRootPath(importRootPath: string) {
 
 function translateHostPathToMountedRoot(targetPath: string) {
   const configuredRepoRoot = process.env.HOST_REPO_ROOT?.trim();
+  const runtimeCandidates = uniquePaths([
+    process.cwd(),
+    findRepoRoot(process.cwd()) ?? process.cwd(),
+  ]);
+  const normalizedTarget = path.resolve(targetPath);
+  const targetSegments = splitPathSegments(normalizedTarget);
+  const workspaceRootIndex = targetSegments.findIndex((segment) => segment.toLowerCase() === 'workspace');
+
+  if (workspaceRootIndex !== -1) {
+    for (const candidateRoot of runtimeCandidates) {
+      const mountedRoot = fs.existsSync(candidateRoot) ? fs.realpathSync.native(candidateRoot) : candidateRoot;
+      const candidatePath = path.join(mountedRoot, ...targetSegments.slice(workspaceRootIndex + 1));
+      if (fs.existsSync(candidatePath)) {
+        return candidatePath;
+      }
+    }
+
+    const fallbackRoot = runtimeCandidates.at(-1) ?? process.cwd();
+    return path.join(fallbackRoot, ...targetSegments.slice(workspaceRootIndex + 1));
+  }
 
   if (!configuredRepoRoot) {
     return null;
   }
 
-  const normalizedTarget = path.resolve(targetPath);
   const normalizedHostRoot = path.resolve(configuredRepoRoot);
   const relativeToHostRoot = path.relative(normalizedHostRoot, normalizedTarget);
-  const mountedRoot = mapWorkspacePathToMountedRoot(configuredRepoRoot);
-
   if (relativeToHostRoot === '' || (!relativeToHostRoot.startsWith('..') && !path.isAbsolute(relativeToHostRoot))) {
-    return path.join(mountedRoot, relativeToHostRoot);
+    for (const candidateRoot of runtimeCandidates) {
+      const candidatePath = path.join(candidateRoot, relativeToHostRoot);
+      if (fs.existsSync(candidatePath)) {
+        return candidatePath;
+      }
+    }
+
+    return path.join(runtimeCandidates.at(-1) ?? process.cwd(), relativeToHostRoot);
   }
 
   return null;
@@ -6340,7 +7072,7 @@ async function performIntakeInspection(
       normalizationStatus = 'failed';
     }
   } else if (detection.format === 'pdf') {
-    const pdfOutcome = inspectPdfImport(importRootPath);
+    const pdfOutcome = await inspectPdfImport(importRootPath);
     detectedEntrypoint = pdfOutcome.detectedEntrypoint;
     structureSummary = pdfOutcome.structureSummary;
     warnings.push(...pdfOutcome.warnings);
@@ -6564,7 +7296,31 @@ function inspectDocxImport(importRootPath: string) {
   };
 }
 
-function inspectPdfImport(importRootPath: string) {
+async function extractPdfImportText(importRootPath: string) {
+  const warnings: string[] = [];
+
+  try {
+    const buffer = fs.readFileSync(importRootPath);
+    const { extractPdfText } = await import('@thesis-research-os/pdf-evidence-extractor');
+    const extracted = await extractPdfText(buffer);
+    if (!extracted.text.trim() || extracted.text.trim().length < 80) {
+      warnings.push('PDF text extraction remained weak after pdf-parse; OCR fallback is still pending for this environment.');
+    }
+
+    return {
+      text: extracted.text ?? '',
+      warnings,
+    };
+  } catch {
+    warnings.push('PDF text extraction fallback could not parse the file; raw outline extraction was used instead.');
+    return {
+      text: '',
+      warnings,
+    };
+  }
+}
+
+async function inspectPdfImport(importRootPath: string) {
   const warnings: string[] = [];
   const failures: IntakeFailureDiagnostic[] = [];
   const normalizedNodeSeed: Array<Omit<typeof normalizedNodes.$inferInsert, 'thesisId' | 'intakeJobId' | 'ordinal'>> = [];
@@ -6578,7 +7334,9 @@ function inspectPdfImport(importRootPath: string) {
       detail: importRootPath,
     });
   } else {
-    const outline = extractPdfOutline(buffer.toString('utf8'), path.basename(importRootPath));
+    const extracted = await extractPdfImportText(importRootPath);
+    warnings.push(...extracted.warnings);
+    const outline = extractPdfOutline(extracted.text || buffer.toString('utf8'), path.basename(importRootPath));
     warnings.push(...outline.warnings);
     normalizedNodeSeed.push(...outline.nodes);
   }
@@ -6629,7 +7387,7 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
   const blockedIncludes: NonNullable<StructureSummary['includeGraph']>['blocked'] = [];
   const cycles: NonNullable<StructureSummary['includeGraph']>['cycles'] = [];
   const baseNow = new Date().toISOString();
-  const rootRelativePath = path.relative(rootDir, entrypoint);
+  const rootRelativePath = toPortablePath(path.relative(rootDir, entrypoint));
   const rootId = stableNodeId('latex', rootRelativePath, 'document', 0, 'document');
 
   const rootContent = fs.readFileSync(entrypoint, 'utf8');
@@ -6664,7 +7422,7 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
   };
 
   const visitFile = (absolutePath: string) => {
-    const relativePath = path.relative(rootDir, absolutePath);
+    const relativePath = toPortablePath(path.relative(rootDir, absolutePath));
     if (visitStack.includes(relativePath)) {
       cycles.push({ path: [...visitStack, relativePath] });
       warnings.push(`Cycle-safe traversal skipped recursive include back into ${relativePath}.`);
@@ -6728,7 +7486,7 @@ function buildLatexGraph(rootDir: string, entrypoint: string) {
         const candidate = rawTarget.endsWith('.tex') ? rawTarget : `${rawTarget}.tex`;
         const resolvedCandidate = path.resolve(path.dirname(absolutePath), candidate);
         const resolvedPath = fs.existsSync(resolvedCandidate) ? fs.realpathSync(resolvedCandidate) : resolvedCandidate;
-        const relative = path.relative(rootDir, resolvedPath);
+        const relative = toPortablePath(path.relative(rootDir, resolvedPath));
 
         if (relative.startsWith('..') || path.isAbsolute(relative)) {
           blockedIncludes.push({
@@ -7251,7 +8009,7 @@ function collectTexFiles(rootDir: string) {
         continue;
       }
       if (entry.isFile() && entry.name.toLowerCase().endsWith('.tex')) {
-        found.push(path.relative(rootDir, absolutePath));
+        found.push(toPortablePath(path.relative(rootDir, absolutePath)));
       }
     }
   };

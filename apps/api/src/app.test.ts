@@ -8,7 +8,49 @@ import zlib from 'node:zlib';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createApp, resolveRuntimeDatabaseUrl } from './app.js';
-import { createDatabaseConnection } from '@thesis-research-os/db';
+import { createDatabaseConnection, getDatabaseFilePath } from '@thesis-research-os/db';
+
+async function removeFileWithRetries(filePath: string, retries = 20) {
+  for (let attempt = 0; attempt < retries; attempt += 1) {
+    try {
+      await fs.promises.rm(filePath, { force: true });
+      return;
+    } catch (error) {
+      const isRetryable = error instanceof Error
+        && 'code' in error
+        && ((error as NodeJS.ErrnoException).code === 'EPERM' || (error as NodeJS.ErrnoException).code === 'EBUSY');
+
+      if (attempt === retries - 1) {
+        return;
+      }
+
+      if (!isRetryable) {
+        return;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
+}
+
+function ensureMountedLatexProjectFixture(relativeFixtureDir = path.join('tmp', 'user-testing-intake-normalization', 'latex-project')) {
+  const repoRoot = path.resolve(import.meta.dirname, '..', '..', '..');
+  const latexDir = path.join(repoRoot, relativeFixtureDir);
+  fs.mkdirSync(latexDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(latexDir, 'main.tex'),
+    [
+      '\\documentclass{report}',
+      '\\begin{document}',
+      '\\chapter{Introducción}',
+      '\\section{Marco teórico}',
+      'Contenido base para intake.',
+      '\\end{document}',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+}
 
 describe('GET /health', () => {
   let app: ReturnType<typeof createApp>;
@@ -249,11 +291,64 @@ describe('GET /status/capabilities', () => {
 
 });
 
+describe('GET /openclaw/*', () => {
+  let app: ReturnType<typeof createApp>;
+
+  beforeEach(() => {
+    vi.unstubAllEnvs();
+    app = createApp();
+  });
+
+  afterAll(async () => {
+    await app?.close();
+    vi.unstubAllEnvs();
+  });
+
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it('reports OpenClaw runtime status and discovered agents with a stable shape', async () => {
+    const [statusResponse, agentsResponse] = await Promise.all([
+      app.inject({ method: 'GET', url: '/openclaw/status' }),
+      app.inject({ method: 'GET', url: '/openclaw/agents' }),
+    ]);
+
+    expect(statusResponse.statusCode).toBe(200);
+    expect(agentsResponse.statusCode).toBe(200);
+
+    const statusPayload = statusResponse.json() as {
+      status: {
+        installed: boolean;
+        statusAvailable: boolean;
+        gatewayUrl: string | null;
+        gatewayReachable: boolean;
+        defaultAgentId: string | null;
+        agents: Array<{ id: string; routes: string[]; bindingDetails: string[] }>;
+        issues: string[];
+      };
+    };
+    const agentsPayload = agentsResponse.json() as {
+      agents: Array<{ id: string; routes: string[]; bindingDetails: string[] }>;
+    };
+
+    expect(typeof statusPayload.status.installed).toBe('boolean');
+    expect(typeof statusPayload.status.statusAvailable).toBe('boolean');
+    expect(statusPayload.status.gatewayUrl === null || typeof statusPayload.status.gatewayUrl === 'string').toBe(true);
+    expect(typeof statusPayload.status.gatewayReachable).toBe('boolean');
+    expect(statusPayload.status.defaultAgentId === null || typeof statusPayload.status.defaultAgentId === 'string').toBe(true);
+    expect(Array.isArray(statusPayload.status.issues)).toBe(true);
+    expect(Array.isArray(statusPayload.status.agents)).toBe(true);
+    expect(agentsPayload.agents).toEqual(statusPayload.status.agents);
+  });
+});
+
 describe('GET /zotero/*', () => {
   let app: ReturnType<typeof createApp>;
 
   beforeEach(() => {
     vi.unstubAllEnvs();
+    ensureMountedLatexProjectFixture();
     app = createApp();
   });
 
@@ -455,6 +550,26 @@ describe('GET /zotero/*', () => {
     ]);
   });
 
+  it('routes Zotero queries through the MCP bridge when configured for MCP mode', async () => {
+    vi.stubEnv('ZOTERO_CONNECTOR_MODE', 'mcp');
+    vi.stubEnv('ZOTERO_MCP_CONNECTOR_MODE', 'test');
+
+    const baseUrl = await app.listen({ port: 0, host: '127.0.0.1' });
+    vi.stubEnv('THESIS_MCP_BRIDGE_URL', baseUrl);
+
+    const response = await fetch(`${baseUrl}/zotero/libraries`);
+
+    expect(response.status).toBe(200);
+    const payload = await response.json() as {
+      libraries: Array<{ key: string; mode: string }>;
+    };
+
+    expect(payload.libraries).toEqual([
+      expect.objectContaining({ key: 'lib-user-main', mode: 'test' }),
+      expect.objectContaining({ key: 'lib-group-thesis-lab', mode: 'test' }),
+    ]);
+  });
+
   it('persists thesis and chapter Zotero mappings, scopes mapping lists, refreshes metadata without changing local identity, and exposes degraded connector states', async () => {
     const thesisAResponse = await app.inject({
       method: 'POST',
@@ -651,7 +766,7 @@ describe('resolveRuntimeDatabaseUrl', () => {
   it('uses a relative workspace database path when no explicit database env is configured', async () => {
     vi.stubEnv('HOST_REPO_ROOT', '/root/thesislab');
 
-    expect(resolveRuntimeDatabaseUrl()).toBe(`file:${path.resolve(process.cwd(), 'data', 'thesis-research-os.sqlite')}`);
+    expect(resolveRuntimeDatabaseUrl()).toBe(`file:${getDatabaseFilePath()}`);
   });
 
 });
@@ -786,6 +901,7 @@ describe('thesis lifecycle registry routes', () => {
 
   beforeEach(() => {
     vi.unstubAllEnvs();
+    ensureMountedLatexProjectFixture();
     databaseUrl = createTestDatabaseUrl();
     vi.stubEnv('DATABASE_URL', databaseUrl);
     app = createApp();
@@ -797,11 +913,12 @@ describe('thesis lifecycle registry routes', () => {
 
   afterEach(async () => {
     await app.close();
+    vi.unstubAllGlobals();
 
     const databasePath = databaseUrl.startsWith('file:') ? databaseUrl.slice('file:'.length) : databaseUrl;
 
     if (databasePath) {
-      fs.rmSync(databasePath, { force: true });
+      await removeFileWithRetries(databasePath);
     }
   });
 
@@ -939,6 +1056,67 @@ describe('thesis lifecycle registry routes', () => {
     expect(updated.thesis.thesis.slug).toBe('tesis-actualizada');
     expect(updated.thesis.checkpointCount).toBe(0);
     expect(updated.thesis.feedbackCount).toBe(0);
+  });
+
+  it('stores OpenClaw thesis and workflow-pack assignments for brain-driven routing', async () => {
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis OpenClaw routing',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/openclaw-routing',
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const initialAssignmentResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/openclaw-assignment`,
+    });
+
+    expect(initialAssignmentResponse.statusCode).toBe(200);
+    const initialAssignment = (initialAssignmentResponse.json() as {
+      assignment: { thesisTarget: { agentId: string | null; sessionKey: string | null }; workflowPackTargets: Array<{ workflowPackId: string; name: string }> };
+    }).assignment;
+    expect(initialAssignment.thesisTarget).toEqual({ agentId: null, sessionKey: null });
+    expect(initialAssignment.workflowPackTargets.length).toBeGreaterThan(0);
+
+    const thesisAssignmentResponse = await app.inject({
+      method: 'PATCH',
+      url: `/theses/${thesisId}/openclaw-assignment`,
+      payload: {
+        agentId: 'main',
+        sessionKey: 'agent:main:main',
+      },
+    });
+
+    expect(thesisAssignmentResponse.statusCode).toBe(200);
+    expect((thesisAssignmentResponse.json() as { assignment: { thesisTarget: { agentId: string | null; sessionKey: string | null } } }).assignment.thesisTarget).toEqual({
+      agentId: 'main',
+      sessionKey: 'agent:main:main',
+    });
+
+    const researchPack = initialAssignment.workflowPackTargets.find((pack) => pack.name === 'research');
+    expect(researchPack).toBeDefined();
+
+    const workflowPackAssignmentResponse = await app.inject({
+      method: 'PATCH',
+      url: `/theses/${thesisId}/workflow-packs/${researchPack?.workflowPackId}/openclaw-assignment`,
+      payload: {
+        agentId: 'research',
+      },
+    });
+
+    expect(workflowPackAssignmentResponse.statusCode).toBe(200);
+    expect((workflowPackAssignmentResponse.json() as { workflowPack: { openClawAgentId: string | null; openClawSessionKey: string | null } }).workflowPack).toEqual(
+      expect.objectContaining({
+        openClawAgentId: 'research',
+        openClawSessionKey: null,
+      }),
+    );
   });
 
   it('persists inspectable state transitions with thesis-specific blockers and next steps', async () => {
@@ -1197,7 +1375,7 @@ describe('thesis lifecycle registry routes', () => {
 
     expect(resumePayload.resume.thesis.id).toBe(thesisAId);
     expect(resumePayload.resume.blockers).toEqual(['Esperando comentarios del tutor']);
-    expect(resumePayload.resume.nextAction).toBe('Revisa el feedback recibido y planifica la siguiente iteración.');
+    expect(resumePayload.resume.nextAction).toBe('Continúa con el flujo "intake" en el paso "Registrar origen".');
     expect(resumePayload.resume.latestCheckpoint).toMatchObject({
       id: (checkpointNewer.json() as { checkpoint: { id: string } }).checkpoint.id,
       thesisId: thesisAId,
@@ -1687,6 +1865,304 @@ Conclusiones finales.
     expect(detailPayload.source.thesisId).toBe(thesisId);
     expect(detailPayload.source.authors).toEqual(['Ada Lovelace', 'Grace Hopper']);
     expect(detailPayload.source.ingest.signature).toEqual(expect.any(String));
+  });
+
+  it('creates and lists citations, then syncs Zotero bibliography to the official thesis workspace', async () => {
+    const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'thesis-bibliography-'));
+
+    const thesisResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis bibliografia zotero',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: workspaceRoot,
+        officialWorkspacePath: workspaceRoot,
+      },
+    });
+
+    const thesisId = (thesisResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const mappingResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/zotero-mappings`,
+      payload: {
+        scope: 'thesis',
+        libraryId: 'lib-user-main',
+        collectionKey: 'col-ml-core',
+        itemKey: 'item-traceability-2024',
+      },
+    });
+
+    expect(mappingResponse.statusCode).toBe(201);
+    const mappingId = (mappingResponse.json() as { mapping: { id: string } }).mapping.id;
+
+    const citationResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/citations`,
+      payload: {
+        zoteroMappingId: mappingId,
+        citationKey: 'lovelace2024',
+        locator: 'p. 14',
+        status: 'linked',
+      },
+    });
+
+    expect(citationResponse.statusCode).toBe(201);
+    expect((citationResponse.json() as { citation: { citationKey: string; zoteroMappingId: string } }).citation).toMatchObject({
+      citationKey: 'lovelace2024',
+      zoteroMappingId: mappingId,
+    });
+
+    const citationsResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/citations`,
+    });
+
+    expect(citationsResponse.statusCode).toBe(200);
+    expect((citationsResponse.json() as { citations: Array<{ citationKey: string }> }).citations).toEqual([
+      expect.objectContaining({ citationKey: 'lovelace2024' }),
+    ]);
+
+    const syncResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/zotero/sync-bibliography`,
+    });
+
+    expect(syncResponse.statusCode).toBe(201);
+    const syncPayload = syncResponse.json() as {
+      sync: { filePath: string; writtenEntries: number; missingItemKeys: string[]; bibliography: string };
+    };
+    expect(syncPayload.sync.writtenEntries).toBeGreaterThanOrEqual(1);
+    expect(syncPayload.sync.missingItemKeys).toEqual([]);
+    expect(syncPayload.sync.filePath).toContain(path.join('references', 'zotero.bib'));
+    expect(syncPayload.sync.bibliography).toContain('Traceable Evidence in AI Research');
+    expect(fs.readFileSync(syncPayload.sync.filePath, 'utf8')).toContain('Traceable Evidence in AI Research');
+  });
+
+  it('searches, fetches, and captures research artifacts into source, evidence, claim, and citation records', async () => {
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+
+      if (url.startsWith('https://api.crossref.org/works')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            message: {
+              items: [
+                {
+                  title: ['Evidence-grounded methodology'],
+                  DOI: '10.1234/example',
+                  URL: 'https://doi.org/10.1234/example',
+                  type: 'journal-article',
+                  'container-title': ['Journal of Thesis Systems'],
+                },
+              ],
+            },
+          }),
+        };
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '<html><head><title>Evidence-grounded methodology</title></head><body>doi 10.1234/example and supporting text</body></html>',
+      };
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const thesisResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis research capture',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fs.mkdtempSync(path.join(os.tmpdir(), 'thesis-research-capture-')),
+      },
+    });
+
+    const thesisId = (thesisResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const searchResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/research/search`,
+      payload: { query: 'evidence grounded methodology' },
+    });
+
+    expect(searchResponse.statusCode).toBe(200);
+    expect((searchResponse.json() as { results: Array<{ title: string }> }).results).toEqual([
+      expect.objectContaining({ title: 'Evidence-grounded methodology' }),
+    ]);
+
+    const fetchResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/research/fetch`,
+      payload: { url: 'https://example.com/paper' },
+    });
+
+    expect(fetchResponse.statusCode).toBe(200);
+    expect((fetchResponse.json() as { page: { title: string; text: string } }).page).toMatchObject({
+      title: 'Evidence-grounded methodology',
+    });
+
+    const captureResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/research/capture`,
+      payload: {
+        source: {
+          sourceType: 'web',
+          title: 'Evidence-grounded methodology',
+          authors: ['Beatriz Researcher'],
+          locator: 'https://example.com/paper',
+        },
+        evidence: {
+          snippet: 'Supporting text for the captured claim.',
+          extractionMethod: 'web-scrape',
+          confidence: 0.84,
+          status: 'captured',
+        },
+        claim: {
+          text: 'The methodology is evidence-grounded.',
+          status: 'draft',
+        },
+        citation: {
+          citationKey: 'researcher2026',
+          locator: 'web',
+          status: 'linked',
+        },
+      },
+    });
+
+    expect(captureResponse.statusCode).toBe(201);
+    const capturePayload = captureResponse.json() as {
+      captured: {
+        duplicate: boolean;
+        source: { id: string; title: string };
+        evidenceFragment: { id: string; sourceId: string };
+        claim: { id: string };
+        citation: { citationKey: string; sourceId: string | null; claimId: string | null };
+      };
+    };
+
+    expect(capturePayload.captured.duplicate).toBe(false);
+    expect(capturePayload.captured.source.title).toBe('Evidence-grounded methodology');
+    expect(capturePayload.captured.evidenceFragment.sourceId).toBe(capturePayload.captured.source.id);
+    expect(capturePayload.captured.citation).toMatchObject({
+      citationKey: 'researcher2026',
+      sourceId: capturePayload.captured.source.id,
+      claimId: capturePayload.captured.claim.id,
+    });
+
+    vi.unstubAllGlobals();
+  });
+
+  it('delegates research search and fetch to OpenClaw agents when configured', async () => {
+    vi.stubEnv('OPENCLAW_BASE_URL', 'https://openclaw.example');
+
+    const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+      const payload = JSON.parse(String(init?.body ?? '{}')) as {
+        task?: string;
+        payload?: Record<string, unknown>;
+      };
+
+      if (payload.task === 'research.search') {
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: async () => ([{
+            title: 'OpenClaw ranked source',
+            url: 'https://doi.org/10.9999/openclaw',
+            snippet: 'OpenClaw agent ranking',
+            source: 'openclaw',
+          }]),
+        };
+      }
+
+      if (payload.task === 'research.fetch') {
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: async () => ({
+            title: 'OpenClaw fetched page',
+            text: 'Agent extracted content',
+            html: '<html><title>OpenClaw fetched page</title><body>Agent extracted content</body></html>',
+          }),
+        };
+      }
+
+      throw new Error(`Unexpected OpenClaw task ${payload.task ?? 'unknown'}`);
+    });
+
+    vi.stubGlobal('fetch', fetchMock);
+
+    const thesisResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis OpenClaw agents',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fs.mkdtempSync(path.join(os.tmpdir(), 'thesis-openclaw-agents-')),
+        openClawAgentId: 'research-brain',
+        openClawSessionKey: 'agent:research-brain:main',
+      },
+    });
+
+    const thesisId = (thesisResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+
+    const searchResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/research/search`,
+      payload: { query: 'agentic literature review' },
+    });
+
+    expect(searchResponse.statusCode).toBe(200);
+    expect((searchResponse.json() as { results: Array<{ title: string; source: string }> }).results).toEqual([
+      expect.objectContaining({
+        title: 'OpenClaw ranked source',
+        source: 'openclaw',
+      }),
+    ]);
+
+    const fetchResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/research/fetch`,
+      payload: { url: 'https://example.com/openclaw-source' },
+    });
+
+    expect(fetchResponse.statusCode).toBe(200);
+    expect((fetchResponse.json() as { page: { title: string; text: string } }).page).toEqual(
+      expect.objectContaining({
+        title: 'OpenClaw fetched page',
+        text: 'Agent extracted content',
+      }),
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body ?? '{}'))).toMatchObject({
+      task: 'research.search',
+      payload: {
+        query: 'agentic literature review',
+        agentId: 'research-brain',
+        sessionKey: 'agent:research-brain:main',
+      },
+    });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body ?? '{}'))).toMatchObject({
+      task: 'research.fetch',
+      payload: {
+        url: 'https://example.com/openclaw-source',
+        agentId: 'research-brain',
+        sessionKey: 'agent:research-brain:main',
+      },
+    });
+
+    vi.unstubAllGlobals();
   });
 
   it('creates provenance-rich evidence fragments linked to thesis section and task context', async () => {
@@ -2402,15 +2878,15 @@ Conclusiones finales.
 
     expect((listPacksResponse.json() as {
       workflowPacks: Array<{ id: string; status: string; currentStepId: string | null }>;
-    }).workflowPacks).toEqual([
+    }).workflowPacks).toContainEqual(
       expect.objectContaining({
         id: createdPack.workflowPack.id,
         status: 'in_progress',
         currentStepId: createdPack.workflowPack.steps[2]?.id,
       }),
-    ]);
+    );
 
-    expect((resumeResponse.json() as {
+    const resumePayload = (resumeResponse.json() as {
       resume: {
         activeTask: { id: string; status: string } | null;
         blockers: string[];
@@ -2423,30 +2899,31 @@ Conclusiones finales.
           progress: { completedSteps: number; inProgressSteps: number };
         }>;
       };
-    }).resume).toMatchObject({
+    }).resume;
+
+    expect(resumePayload).toMatchObject({
       activeTask: {
         id: taskId,
         status: 'in_progress',
       },
       blockers: ['Falta confirmar dos citas clave con el tutor.'],
       nextAction: 'Cerrar rutina de revisión bibliográfica: continúa con "Actualizar sección del marco teórico".',
-      workflowPacks: [
-        {
-          id: createdPack.workflowPack.id,
-          status: 'in_progress',
-          currentStepId: createdPack.workflowPack.steps[2]?.id,
-          progress: {
-            completedSteps: 2,
-            inProgressSteps: 1,
-          },
-          steps: [
-            { title: 'Reunir citas prioritarias', status: 'completed', isCurrent: false },
-            { title: 'Validar citas con tutor', status: 'completed', isCurrent: false },
-            { title: 'Actualizar sección del marco teórico', status: 'in_progress', isCurrent: true },
-          ],
-        },
-      ],
     });
+    const createdPackInResume = resumePayload.workflowPacks.find((workflowPack) => workflowPack.id === createdPack.workflowPack.id);
+    expect(createdPackInResume).toMatchObject({
+      id: createdPack.workflowPack.id,
+      status: 'in_progress',
+      currentStepId: createdPack.workflowPack.steps[2]?.id,
+      progress: {
+        completedSteps: 2,
+        inProgressSteps: 1,
+      },
+    });
+    expect(createdPackInResume?.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: 'Reunir citas prioritarias', status: 'completed', isCurrent: false }),
+      expect.objectContaining({ title: 'Validar citas con tutor', status: 'completed', isCurrent: false }),
+      expect.objectContaining({ title: 'Actualizar sección del marco teórico', status: 'in_progress', isCurrent: true }),
+    ]));
   });
 
   it('fails safely for unknown workflow task detail and checkpoint routes', async () => {
@@ -3046,14 +3523,14 @@ Descripción del método.
 
     expect(profilePayload.ok).toBe(true);
     expect(profilePayload.policyProfile).toMatchObject({
-      institutionId: 'universidad-demo::ingenieria',
-      institution: 'Universidad Demo',
-      faculty: 'Ingeniería',
+      institutionId: 'pontificia-universidad-catolica-del-peru::facultad-de-ciencias-e-ingenieria',
+      institution: 'Pontificia Universidad Catolica del Peru',
+      faculty: 'Facultad de Ciencias e Ingenieria',
       version: '2026.1',
     });
     expect(profilePayload.policyProfile.requiredSections).toEqual([
-      'Introducción',
-      'Metodología',
+      'Introduccion',
+      'Metodologia',
       'Resultados',
       'Conclusiones',
     ]);
@@ -3625,7 +4102,7 @@ Hallazgos principales.
     });
     expect(resumePayload.resume.thesis.activeImportId).toBe(intakePayload.intakeJob.id);
     expect(resumePayload.resume.thesis.currentState).toBe('active');
-    expect(resumePayload.resume.nextAction).toBe(detailPayload.thesis.nextStepSummary);
+    expect(resumePayload.resume.nextAction).toBe('Continúa con el flujo "intake" en el paso "Registrar origen".');
     expect(resumePayload.resume.activeWorkspace).toMatchObject({
       intakeJobId: intakePayload.intakeJob.id,
       replacementOfIntakeJobId: null,
@@ -5593,5 +6070,162 @@ Original context body.
         message: `Intake job does-not-exist was not found for thesis ${thesisId}.`,
       });
     }
+  });
+
+  it('exposes active latex structure and previewable section content for the workbench', async () => {
+    const thesisResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis latex workbench',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: '/workspace/thesis-latex-workbench',
+      },
+    });
+
+    const thesisId = (thesisResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: {
+        importRootPath: '/workspace/tmp/user-testing-intake-normalization/latex-project',
+      },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const structureResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/latex/structure`,
+    });
+
+    expect(structureResponse.statusCode).toBe(200);
+    const structurePayload = structureResponse.json() as {
+      structure: {
+        entrypoint: string | null;
+        outline: Array<{ normalizedNodeId: string; nodeType: string; title: string | null }>;
+      };
+    };
+
+    expect(structurePayload.structure.entrypoint).toBe('main.tex');
+    const sectionNode = structurePayload.structure.outline.find((node) => node.nodeType === 'section');
+    expect(sectionNode).toEqual(expect.objectContaining({ title: 'Marco teórico' }));
+
+    const previewResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/latex/sections/${sectionNode?.normalizedNodeId}`,
+    });
+
+    expect(previewResponse.statusCode).toBe(200);
+    expect((previewResponse.json() as { section: { content: string } }).section.content).toContain('\\section{Marco teórico}');
+  });
+
+  it('materializes an official managed latex workspace for DOCX imports and exposes it through the latex workbench', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'docx-official-latex-'));
+    const docxPath = path.join(fixtureRoot, 'outline.docx');
+    const docXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Introducción</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Marco teórico</w:t></w:r></w:p></w:body></w:document>';
+    fs.writeFileSync(docxPath, createZipArchive({
+      '[Content_Types].xml': '<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+      '_rels/.rels': '<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+      'word/document.xml': docXml,
+    }));
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis docx oficial latex',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: docxPath },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const detailResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}`,
+    });
+
+    expect(detailResponse.statusCode).toBe(200);
+    const detailPayload = detailResponse.json() as {
+      thesis: { thesis: { officialWorkspacePath: string | null; officialEntrypoint: string | null } };
+    };
+    expect(detailPayload.thesis.thesis.officialWorkspacePath).toContain(path.join('managed-latex'));
+    expect(detailPayload.thesis.thesis.officialEntrypoint).toBe('main.tex');
+    expect(fs.existsSync(path.join(detailPayload.thesis.thesis.officialWorkspacePath ?? '', 'main.tex'))).toBe(true);
+
+    const structureResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/latex/structure`,
+    });
+
+    expect(structureResponse.statusCode).toBe(200);
+    expect((structureResponse.json() as { structure: { entrypoint: string | null } }).structure.entrypoint).toBe('main.tex');
+  });
+
+  it('materializes an official managed latex workspace for PDF imports and exposes it through the latex workbench', async () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pdf-official-latex-'));
+    const pdfPath = path.join(fixtureRoot, 'outline.pdf');
+    fs.writeFileSync(
+      pdfPath,
+      createPdfWithOutline([
+        { level: 1, title: 'Introducción' },
+        { level: 2, title: 'Marco teórico' },
+        { level: 2, title: 'Resultados' },
+      ]),
+    );
+
+    const createResponse = await app.inject({
+      method: 'POST',
+      url: '/theses',
+      payload: {
+        title: 'Tesis pdf oficial latex',
+        degreeProgram: 'Máster en IA',
+        institution: 'Universidad Demo',
+        workspacePath: fixtureRoot,
+      },
+    });
+
+    const thesisId = (createResponse.json() as { thesis: { thesis: { id: string } } }).thesis.thesis.id;
+    const intakeResponse = await app.inject({
+      method: 'POST',
+      url: `/theses/${thesisId}/intake-jobs`,
+      payload: { importRootPath: pdfPath },
+    });
+
+    expect(intakeResponse.statusCode).toBe(201);
+
+    const detailResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}`,
+    });
+
+    expect(detailResponse.statusCode).toBe(200);
+    const detailPayload = detailResponse.json() as {
+      thesis: { thesis: { officialWorkspacePath: string | null; officialEntrypoint: string | null } };
+    };
+    expect(detailPayload.thesis.thesis.officialWorkspacePath).toContain(path.join('managed-latex'));
+    expect(detailPayload.thesis.thesis.officialEntrypoint).toBe('main.tex');
+    const officialMain = path.join(detailPayload.thesis.thesis.officialWorkspacePath ?? '', 'main.tex');
+    expect(fs.existsSync(officialMain)).toBe(true);
+    expect(fs.readFileSync(officialMain, 'utf8')).toContain('\\chapter{Introducción}');
+
+    const structureResponse = await app.inject({
+      method: 'GET',
+      url: `/theses/${thesisId}/latex/structure`,
+    });
+
+    expect(structureResponse.statusCode).toBe(200);
+    expect((structureResponse.json() as { structure: { entrypoint: string | null } }).structure.entrypoint).toBe('main.tex');
   });
 });

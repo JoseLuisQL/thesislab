@@ -1,0 +1,60 @@
+{
+  "id": "policy-profile-pucp-fci-2026-1",
+  "institution": "Pontificia Universidad Catolica del Peru",
+  "faculty": "Facultad de Ciencias e Ingenieria",
+  "version": "2026.1",
+  "title": "PUCP FCI - Tesis de ingenieria",
+  "requiredSections": [
+    "Introduccion",
+    "Metodologia",
+    "Resultados",
+    "Conclusiones"
+  ],
+  "rules": [
+    {
+      "id": "structure.required-introduction",
+      "title": "Introduccion obligatoria",
+      "description": "La tesis debe incluir una introduccion con contexto, problema y objetivos.",
+      "category": "structure",
+      "severity": "violation",
+      "remediation": "Añade una seccion de Introduccion con contexto, problema y objetivo general.",
+      "requiredSectionTitle": "Introduccion"
+    },
+    {
+      "id": "structure.required-methodology",
+      "title": "Metodologia obligatoria",
+      "description": "La tesis debe describir el enfoque metodologico aplicado.",
+      "category": "structure",
+      "severity": "violation",
+      "remediation": "Añade una seccion de Metodologia con el enfoque, procedimiento e instrumentos usados.",
+      "requiredSectionTitle": "Metodologia"
+    },
+    {
+      "id": "structure.required-results",
+      "title": "Resultados obligatorios",
+      "description": "La tesis debe presentar resultados observables y verificables.",
+      "category": "structure",
+      "severity": "violation",
+      "remediation": "Añade una seccion de Resultados con hallazgos y evidencia asociada.",
+      "requiredSectionTitle": "Resultados"
+    },
+    {
+      "id": "structure.required-conclusions",
+      "title": "Conclusiones obligatorias",
+      "description": "La tesis debe cerrar con conclusiones y cierre del trabajo.",
+      "category": "structure",
+      "severity": "violation",
+      "remediation": "Añade una seccion de Conclusiones con sintesis y trabajo futuro.",
+      "requiredSectionTitle": "Conclusiones"
+    },
+    {
+      "id": "metadata.min-section-count",
+      "title": "Minimo de secciones estructurales",
+      "description": "La tesis debe tener al menos dos secciones evaluables en el modelo normalizado.",
+      "category": "metadata",
+      "severity": "warning",
+      "remediation": "Amplia la estructura visible de la tesis antes del cierre.",
+      "minimumDocumentChildren": 2
+    }
+  ]
+}

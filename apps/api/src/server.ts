@@ -1,4 +1,5 @@
 import { createApp } from './app.js';
+import { pathToFileURL } from 'node:url';
 
 export const resolveApiPort = (): number => {
   const configuredPort = process.env.PORT_API;
@@ -15,9 +16,17 @@ export const resolveApiPort = (): number => {
 const port = resolveApiPort();
 const host = '0.0.0.0';
 
-const app = createApp();
+export function startServer() {
+  const app = createApp();
 
-app.listen({ host, port }).catch((error) => {
-  app.log.error(error);
-  process.exit(1);
-});
+  return app.listen({ host, port }).catch((error) => {
+    app.log.error(error);
+    process.exit(1);
+  });
+}
+
+const isEntrypoint = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isEntrypoint) {
+  void startServer();
+}

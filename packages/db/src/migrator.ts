@@ -221,6 +221,28 @@ async function isRecoverableFollowupMigration(
     return claimsColumns.has('evidence_ordering_json');
   }
 
+  if (record.tag === '0003_policy_workspace_and_citations') {
+    const thesisColumns = await listTableColumns(databaseFilePath, 'theses');
+    const existingTables = await listExistingTables(databaseFilePath);
+    const existingIndexes = await listIndexes(databaseFilePath);
+
+    return thesisColumns.has('policy_profile_id')
+      && thesisColumns.has('official_workspace_path')
+      && thesisColumns.has('official_entrypoint')
+      && existingTables.has('citations')
+      && existingIndexes.has('citations_thesis_key_idx');
+  }
+
+  if (record.tag === '0004_openclaw_assignments') {
+    const thesisColumns = await listTableColumns(databaseFilePath, 'theses');
+    const workflowPackColumns = await listTableColumns(databaseFilePath, 'workflow_packs');
+
+    return thesisColumns.has('openclaw_agent_id')
+      && thesisColumns.has('openclaw_session_key')
+      && workflowPackColumns.has('openclaw_agent_id')
+      && workflowPackColumns.has('openclaw_session_key');
+  }
+
   const migrationStatements = fs
     .readFileSync(migrationPath, 'utf8')
     .split('--> statement-breakpoint')

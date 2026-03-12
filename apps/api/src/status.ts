@@ -1,3 +1,5 @@
+import { detectRuntimeEnvironment } from '@thesis-research-os/runtime';
+
 type CapabilityState = 'available' | 'degraded' | 'unavailable';
 type CapabilityKind = 'core' | 'integration';
 
@@ -64,6 +66,7 @@ const defaultMission = 'hardening';
 export function buildLocalFirstStatusPayload(options: LocalFirstStatusOptions = {}): LocalFirstStatusPayload {
   const timestamp = new Date().toISOString();
   const zoteroMode = process.env.ZOTERO_CONNECTOR_MODE?.trim() || 'mock';
+  const runtimeEnvironment = detectRuntimeEnvironment();
   const workflowDefaults: Record<WorkflowKey, WorkflowStatusSnapshot> = {
     create: {
       key: 'create',
@@ -96,44 +99,55 @@ export function buildLocalFirstStatusPayload(options: LocalFirstStatusOptions = 
       detail: 'Academic QA remains available independently of optional integrations.',
     },
   };
-  const zoteroApiKey = process.env.ZOTERO_API_KEY?.trim();
-  const mcpAvailable = true; // MCP server package is installed
-  const crossrefAvailable = true; // Crossref is a public API, always available
+  const zoteroCapability = runtimeEnvironment.capabilities.zotero;
+  const openClawCapability = runtimeEnvironment.capabilities.openclaw;
+  const playwrightCapability = runtimeEnvironment.capabilities.playwright;
+  const pandocCapability = runtimeEnvironment.capabilities.pandoc;
+  const libreOfficeCapability = runtimeEnvironment.capabilities.libreoffice;
+  const latexCapability = runtimeEnvironment.capabilities.latex;
+  const ocrCapability = runtimeEnvironment.capabilities.ocr;
+  const mcpCapability = runtimeEnvironment.capabilities.mcp;
+  const crossrefCapability = runtimeEnvironment.capabilities.crossref;
 
   const integrationDefaults: Record<IntegrationKey, IntegrationStatusSnapshot> = {
     zotero: {
       key: 'zotero',
-      state: (zoteroMode === 'live' && zoteroApiKey) || zoteroMode === 'local' ? 'available' : 'degraded',
-      summary: zoteroMode === 'local' ? 'Connected to Zotero desktop' : zoteroMode === 'live' && zoteroApiKey ? 'Live connector active' : zoteroMode === 'mock' ? 'Mock connector only' : 'Connector not fully attached',
-      detail:
-        zoteroMode === 'local'
-          ? 'Zotero connector is using the local desktop API at localhost:23119. No API key needed.'
-          : zoteroMode === 'live' && zoteroApiKey
-          ? 'Zotero connector is using the live Web API v3 with your API key.'
-          : zoteroMode === 'mock'
-          ? 'Zotero runs in mock mode, so local workflows remain usable while bibliography sync is explicitly degraded.'
-          : `Zotero connector mode "${zoteroMode}" is configured, but the connector-backed capability is still treated as an optional degraded integration.`,
+      state: zoteroCapability.state,
+      summary: zoteroCapability.summary,
+      detail: zoteroCapability.detail,
     },
     connectors: {
       key: 'connectors',
-      state: 'degraded',
-      summary: 'Optional adapters unavailable',
-      detail:
-        'OpenClaw-specific or other connector-backed capabilities are optional and currently surfaced as degraded rather than silently disappearing.',
+      state: openClawCapability.state === 'available' || playwrightCapability.state === 'available'
+        || pandocCapability.state === 'available' || libreOfficeCapability.state === 'available'
+        || latexCapability.state === 'available' || ocrCapability.state === 'available'
+        ? 'available'
+        : 'degraded',
+      summary: openClawCapability.state === 'available'
+        ? 'Runtime adapters configured'
+        : 'Runtime adapters partially configured',
+      detail: [
+        `OpenClaw: ${openClawCapability.summary}.`,
+        `Playwright: ${playwrightCapability.summary}.`,
+        `Pandoc: ${pandocCapability.summary}.`,
+        `LibreOffice: ${libreOfficeCapability.summary}.`,
+        `LaTeX: ${latexCapability.summary}.`,
+        `OCR: ${ocrCapability.summary}.`,
+      ].join(' '),
     },
     mcp: {
       key: 'mcp',
-      state: mcpAvailable ? 'available' : 'unavailable',
-      summary: mcpAvailable ? 'MCP server available' : 'MCP server not installed',
-      detail: mcpAvailable
+      state: mcpCapability.state,
+      summary: mcpCapability.summary,
+      detail: mcpCapability.state === 'available'
         ? 'The MCP server package (@thesis-research-os/mcp-server) is installed. Run with: npx thesis-mcp'
-        : 'Install @thesis-research-os/mcp-server to enable MCP support.',
+        : mcpCapability.detail,
     },
     crossref: {
       key: 'crossref',
-      state: crossrefAvailable ? 'available' : 'degraded',
-      summary: 'Crossref DOI resolution active',
-      detail: 'Crossref public API is available for DOI metadata resolution. Use GET /resolve-doi?doi=... to resolve.',
+      state: crossrefCapability.state,
+      summary: crossrefCapability.summary,
+      detail: `${crossrefCapability.detail} Use GET /resolve-doi?doi=... to resolve.`,
     },
   };
   const workflows = {
@@ -155,7 +169,7 @@ export function buildLocalFirstStatusPayload(options: LocalFirstStatusOptions = 
       state: 'ready',
       summary: 'Core thesis workflows are available in local-first mode.',
       detail:
-        'The API exposes local thesis workflow capabilities directly and keeps optional integrations in explicit degraded states instead of hiding them.',
+        'The API exposes local thesis workflow capabilities directly and reports runtime/toolchain readiness from the real machine instead of hard-coded optimistic defaults.',
     },
     workflows: [
       {

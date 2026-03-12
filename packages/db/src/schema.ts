@@ -21,7 +21,12 @@ export const theses = sqliteTable('theses', {
   slug: text('slug').notNull(),
   degreeProgram: text('degree_program').notNull(),
   institution: text('institution').notNull(),
+  policyProfileId: text('policy_profile_id'),
+  openClawAgentId: text('openclaw_agent_id'),
+  openClawSessionKey: text('openclaw_session_key'),
   workspacePath: text('workspace_path').notNull(),
+  officialWorkspacePath: text('official_workspace_path'),
+  officialEntrypoint: text('official_entrypoint'),
   defaultLanguage: text('default_language').notNull(),
   currentState: text('current_state').notNull(),
   latestStatusAt: text('latest_status_at').notNull(),
@@ -79,6 +84,8 @@ export const workflowPacks = sqliteTable('workflow_packs', {
   description: text('description').notNull(),
   status: text('status').notNull(),
   currentStepId: text('current_step_id'),
+  openClawAgentId: text('openclaw_agent_id'),
+  openClawSessionKey: text('openclaw_session_key'),
   ...timestampColumns,
 });
 
@@ -217,6 +224,22 @@ export const zoteroMappings = sqliteTable('zotero_mappings', {
   ...timestampColumns,
 });
 
+export const citations = sqliteTable('citations', {
+  id: text('id').primaryKey(),
+  thesisId: text('thesis_id').notNull().references(() => theses.id, { onDelete: 'cascade' }),
+  sourceId: text('source_id').references(() => sources.id, { onDelete: 'set null' }),
+  zoteroMappingId: text('zotero_mapping_id').references(() => zoteroMappings.id, { onDelete: 'set null' }),
+  normalizedNodeId: text('normalized_node_id').references((): AnySQLiteColumn => normalizedNodes.id, { onDelete: 'set null' }),
+  claimId: text('claim_id').references(() => claims.id, { onDelete: 'set null' }),
+  citationKey: text('citation_key').notNull(),
+  locator: text('locator'),
+  style: text('style').notNull().default('bibtex'),
+  status: text('status').notNull().default('draft'),
+  ...timestampColumns,
+}, (table) => ({
+  citationKeyIndex: uniqueIndex('citations_thesis_key_idx').on(table.thesisId, table.citationKey),
+}));
+
 export const policyProfiles = sqliteTable('policy_profiles', {
   id: text('id').primaryKey(),
   institution: text('institution').notNull(),
@@ -311,6 +334,7 @@ export const thesisRelations = relations(theses, ({ many }) => ({
   evidenceFragments: many(evidenceFragments),
   claims: many(claims),
   zoteroMappings: many(zoteroMappings),
+  citations: many(citations),
   complianceRuns: many(complianceRuns),
   academicQaRuns: many(academicQaRuns),
   buildRuns: many(buildRuns),
@@ -449,6 +473,25 @@ export const zoteroMappingRelations = relations(zoteroMappings, ({ one }) => ({
   }),
 }));
 
+export const citationRelations = relations(citations, ({ one }) => ({
+  thesis: one(theses, {
+    fields: [citations.thesisId],
+    references: [theses.id],
+  }),
+  source: one(sources, {
+    fields: [citations.sourceId],
+    references: [sources.id],
+  }),
+  zoteroMapping: one(zoteroMappings, {
+    fields: [citations.zoteroMappingId],
+    references: [zoteroMappings.id],
+  }),
+  claim: one(claims, {
+    fields: [citations.claimId],
+    references: [claims.id],
+  }),
+}));
+
 export const policyProfileRelations = relations(policyProfiles, ({ many }) => ({
   complianceRuns: many(complianceRuns),
   complianceIssues: many(complianceIssues),
@@ -527,6 +570,7 @@ export const schema = {
   claims,
   claimEvidenceLinks,
   zoteroMappings,
+  citations,
   policyProfiles,
   complianceRuns,
   complianceIssues,
